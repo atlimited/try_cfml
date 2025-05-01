@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-from sklearn.linear_model import LinearRegression
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, roc_auc_score, brier_score_loss, log_loss
 import matplotlib.pyplot as plt
 
@@ -8,9 +8,9 @@ import matplotlib.pyplot as plt
 df = pd.read_csv("df.csv")
 
 # S-Learner モデル学習
+model = LogisticRegression(solver='lbfgs', max_iter=1000)
 X = df[['age', 'homeownership', 'treatment']]
 y = df['outcome']
-model = LinearRegression()
 model.fit(X, y)
 
 # ITE & ATE 推定
