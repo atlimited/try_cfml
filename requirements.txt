@@ -14,3 +14,7 @@ scikit-learn==1.6.1
 
 # 可視化ライブラリ
 matplotlib==3.10.1
+seaborn==0.13.2
+
+# 統計ライブラリ
+statsmodels==0.14.4
