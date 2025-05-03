@@ -22,7 +22,8 @@ from model_evaluation import (
     evaluate_all_models_cv,
     print_cv_results,
     run_cv_with_statistics,
-    evaluate_model_cv
+    evaluate_model_cv,
+    evaluate_cv_with_top_n
 )
 from causal_evaluation import (
     compute_propensity_scores,
@@ -39,6 +40,8 @@ from model_utils import (
     ensure_dataframe,
     get_model_trainer
 )
+
+
 
 def estimate_ate_with_propensity_scores(df, X, treatment, outcome):
     """
@@ -201,140 +204,27 @@ def main():
     # ここから、指定したモデルだけを評価するように変更
     # 分類器と回帰器のモデル比較部分は、指定したモデルのみ実行
     if args.model or (args.model_type and args.learner_type):
-        # クロスバリデーションを実行する場合
-        if args.cv:
-            print(f"\n===== {model_type}のクロスバリデーション評価 =====")
-            
-            # 既に上で base_model_type と learner_type が設定されているので、
-            # ここでは再分離しない
-            
-            from model_evaluation import evaluate_model_cv
-            
-            # デバッグ情報を出力
-            print(f"  モデルタイプ: {base_model_type}, 学習器タイプ: {learner_type}")
-            
-            cv_results = evaluate_model_cv(
-                X, treatment, outcome, true_ite=df['true_ite'].values if 'true_ite' in df.columns else None,
-                model_type=base_model_type,  # s_learner などのシンプルな形式
-                learner_type=learner_type,
-                propensity_score=p_score,
-                n_splits=args.folds,  # 外部から指定可能なfold数
-                random_state=42,
-                classification_threshold=args.threshold
-            )
-            print(f"\n{model_type}:")
-            
-            # 処置効果の評価指標
-            if 'correlation' in cv_results:
-                print(f"  ====== 処置効果の評価 ======")
-                print(f"  相関係数: {cv_results.get('correlation', 0):.4f} (±{cv_results.get('correlation_std', 0):.4f})")
-                print(f"  MSE: {cv_results.get('mse', 0):.4f} (±{cv_results.get('mse_std', 0):.4f})")
-                print(f"  符号一致率: {cv_results.get('sign_accuracy', 0):.4f} (±{cv_results.get('sign_accuracy_std', 0):.4f})")
-                print(f"  R2: {cv_results.get('r2', 0):.4f} (±{cv_results.get('r2_std', 0):.4f})")
-                if 'auc_roc' in cv_results:
-                    print(f"  AUC-ROC: {cv_results.get('auc_roc', 0):.4f} (±{cv_results.get('auc_roc_std', 0):.4f})")
-            
-            # 処置群の予測評価
-            if 'treated_outcome_mse' in cv_results:
-                avg_treated_size = cv_results.get('avg_treated_size', 0)
-                print(f"\n  ====== 処置群の予測評価 (平均サンプル数: {avg_treated_size:.1f}, {args.folds}分割交差検証平均) ======")
-                print(f"  MSE: {cv_results.get('treated_outcome_mse', 0):.4f} (±{cv_results.get('treated_outcome_mse_std', 0):.4f})")
-                print(f"  R2: {cv_results.get('treated_outcome_r2', 0):.4f} (±{cv_results.get('treated_outcome_r2_std', 0):.4f})")
-                if 'treated_outcome_accuracy' in cv_results:
-                    print(f"  正解率: {cv_results.get('treated_outcome_accuracy', 0):.4f} (±{cv_results.get('treated_outcome_accuracy_std', 0):.4f})")
-                if 'treated_outcome_auc_roc' in cv_results:
-                    print(f"  AUC-ROC: {cv_results.get('treated_outcome_auc_roc', 0):.4f} (±{cv_results.get('treated_outcome_auc_roc_std', 0):.4f})")
-                    print(f"  精度: {cv_results.get('treated_outcome_precision', 0):.4f} (±{cv_results.get('treated_outcome_precision_std', 0):.4f})")
-                    print(f"  再現率: {cv_results.get('treated_outcome_recall', 0):.4f} (±{cv_results.get('treated_outcome_recall_std', 0):.4f})")
-                    print(f"  F1スコア: {cv_results.get('treated_outcome_f1', 0):.4f} (±{cv_results.get('treated_outcome_f1_std', 0):.4f})")
-                
-                if 'treated_outcome_conf_mat' in cv_results:
-                    conf_mat = cv_results.get('treated_outcome_conf_mat')
-                    if conf_mat.size == 4:  # 2x2行列の場合
-                        tn, fp, fn, tp = conf_mat.ravel()
-                        total = tn + fp + fn + tp
-                        print(f"  混同行列 (合計: {total}): [全fold合算]")
-                        print(f"  [[{tn} {fp}]")
-                        print(f"   [{fn} {tp}]]")
-                        print(f"  TN={tn}, FP={fp}, FN={fn}, TP={tp}")
-                    else:
-                        print(f"  混同行列:\n{conf_mat}")
-            
-            # 非処置群の予測評価
-            if 'control_outcome_mse' in cv_results:
-                avg_control_size = cv_results.get('avg_control_size', 0)
-                print(f"\n  ====== 非処置群の予測評価 (平均サンプル数: {avg_control_size:.1f}, {args.folds}分割交差検証平均) ======")
-                print(f"  MSE: {cv_results.get('control_outcome_mse', 0):.4f} (±{cv_results.get('control_outcome_mse_std', 0):.4f})")
-                print(f"  R2: {cv_results.get('control_outcome_r2', 0):.4f} (±{cv_results.get('control_outcome_r2_std', 0):.4f})")
-                if 'control_outcome_accuracy' in cv_results:
-                    print(f"  正解率: {cv_results.get('control_outcome_accuracy', 0):.4f} (±{cv_results.get('control_outcome_accuracy_std', 0):.4f})")
-                if 'control_outcome_auc_roc' in cv_results:
-                    print(f"  AUC-ROC: {cv_results.get('control_outcome_auc_roc', 0):.4f} (±{cv_results.get('control_outcome_auc_roc_std', 0):.4f})")
-                    print(f"  精度: {cv_results.get('control_outcome_precision', 0):.4f} (±{cv_results.get('control_outcome_precision_std', 0):.4f})")
-                    print(f"  再現率: {cv_results.get('control_outcome_recall', 0):.4f} (±{cv_results.get('control_outcome_recall_std', 0):.4f})")
-                    print(f"  F1スコア: {cv_results.get('control_outcome_f1', 0):.4f} (±{cv_results.get('control_outcome_f1_std', 0):.4f})")
-                
-                if 'control_outcome_conf_mat' in cv_results:
-                    conf_mat = cv_results.get('control_outcome_conf_mat')
-                    if conf_mat.size == 4:  # 2x2行列の場合
-                        tn, fp, fn, tp = conf_mat.ravel()
-                        total = tn + fp + fn + tp
-                        print(f"  混同行列 (合計: {total}): [全fold合算]")
-                        print(f"  [[{tn} {fp}]")
-                        print(f"   [{fn} {tp}]]")
-                        print(f"  TN={tn}, FP={fp}, FN={fn}, TP={tp}")
-                    else:
-                        print(f"  混同行列:\n{conf_mat}")
-            
-            # 全体の予測評価
-            if 'overall_outcome_mse' in cv_results:
-                avg_test_size = cv_results.get('avg_test_size', 0)
-                print(f"\n  ====== 全体の予測評価 (平均サンプル数: {avg_test_size:.1f}, {args.folds}分割交差検証平均) ======")
-                print(f"  MSE: {cv_results.get('overall_outcome_mse', 0):.4f} (±{cv_results.get('overall_outcome_mse_std', 0):.4f})")
-                print(f"  R2: {cv_results.get('overall_outcome_r2', 0):.4f} (±{cv_results.get('overall_outcome_r2_std', 0):.4f})")
-                if 'overall_outcome_accuracy' in cv_results:
-                    print(f"  正解率: {cv_results.get('overall_outcome_accuracy', 0):.4f} (±{cv_results.get('overall_outcome_accuracy_std', 0):.4f})")
-                if 'overall_outcome_auc_roc' in cv_results:
-                    print(f"  AUC-ROC: {cv_results.get('overall_outcome_auc_roc', 0):.4f} (±{cv_results.get('overall_outcome_auc_roc_std', 0):.4f})")
-                    print(f"  精度: {cv_results.get('overall_outcome_precision', 0):.4f} (±{cv_results.get('overall_outcome_precision_std', 0):.4f})")
-                    print(f"  再現率: {cv_results.get('overall_outcome_recall', 0):.4f} (±{cv_results.get('overall_outcome_recall_std', 0):.4f})")
-                    print(f"  F1スコア: {cv_results.get('overall_outcome_f1', 0):.4f} (±{cv_results.get('overall_outcome_f1_std', 0):.4f})")
-                
-                if 'overall_outcome_conf_mat' in cv_results:
-                    conf_mat = cv_results.get('overall_outcome_conf_mat')
-                    if conf_mat.size == 4:  # 2x2行列の場合
-                        tn, fp, fn, tp = conf_mat.ravel()
-                        total = tn + fp + fn + tp
-                        print(f"  混同行列 (合計: {total}): [全fold合算]")
-                        print(f"  [[{tn} {fp}]")
-                        print(f"   [{fn} {tp}]]")
-                        print(f"  TN={tn}, FP={fp}, FN={fn}, TP={tp}")
-                    else:
-                        print(f"  混同行列:\n{conf_mat}")
-            
-            # 結果を整形して表示
-            print(f"\n{model_type}:")
-            for metric_name, value in cv_results.items():
-                if isinstance(value, float):
-                    print(f"  {metric_name}: {value:.4f}")
-                else:
-                    print(f"  {metric_name}: {value}")
-        
-        # モデルを学習し、ITE予測
-        print(f"\n===== {model_type}のITE予測 =====")
-        
         # モデルトレーナーの取得
         model_trainer = get_model_trainer(model_type)
+
         if model_trainer:
             # モデルタイプの判別
             learner_type = 'classification' if 'classification' in model_type else 'regression'
+
+            if args.cv:
+                print(f"\n===== {model_type}のクロスバリデーション評価 =====")
+                cv_top_n_results = evaluate_cv_with_top_n(model_trainer, X, outcome, treatment, fold_count=5)
+                #print(cv_top_n_results)
             
+            # モデルを学習し、ITE予測
+            print(f"\n===== {model_type}のITE予測 =====")
+
             # モデルのトレーニング
             print(f"モデル学習開始: {model_type}")
             print(f"特徴量: {X.columns.tolist()}")
             print(f"特徴量の形状: {X.shape}")
             model = model_trainer(X, treatment, outcome, propensity_score=p_score)
-            print(f"モデル学習完了: {model_type}, モデルタイプ: {type(model)}")
+            print(f"モデル学習完了: {model}, モデルタイプ: {type(model)}")
 
             # ITE予測
             print(f"ITE予測開始: {model_type}")
@@ -406,6 +296,140 @@ def main():
                     note = "実際の処置人数" if n == actual_treatment_count else ""
                     
                     print(f"  {n}\t{top_n_effect_sum:.2f}\t{top_n_efficiency:.2f} ({top_n_efficiency*100:.1f}%)\t{top_n_improvement:.2f}倍\t{note}")
+
+
+
+
+
+
+        # クロスバリデーションを実行する場合
+#        if args.cv:
+#            print(f"\n===== {model}のクロスバリデーション評価 =====")
+#            # estimate_with_causalml.pyの修正部分
+#            from model_evaluation import evaluate_cv_with_top_n
+#
+#            cv_top_n_results = evaluate_cv_with_top_n(model, X, outcome, treatment, fold_count=5)
+#
+#            print(cv_top_n_results)
+
+
+            
+#            # 既に上で base_model_type と learner_type が設定されているので、
+#            # ここでは再分離しない
+#            
+#            from model_evaluation import evaluate_model_cv
+#            
+#            # デバッグ情報を出力
+#            print(f"  モデルタイプ: {base_model_type}, 学習器タイプ: {learner_type}")
+#            
+#            cv_results = evaluate_model_cv(
+#                X, treatment, outcome, true_ite=df['true_ite'].values if 'true_ite' in df.columns else None,
+#                model_type=base_model_type,  # s_learner などのシンプルな形式
+#                learner_type=learner_type,
+#                propensity_score=p_score,
+#                n_splits=args.folds,  # 外部から指定可能なfold数
+#                random_state=42,
+#                classification_threshold=args.threshold
+#            )
+#            print(f"\n{model_type}:")
+#            
+#            # 処置効果の評価指標
+#            if 'correlation' in cv_results:
+#                print(f"  ====== 処置効果の評価 ======")
+#                print(f"  相関係数: {cv_results.get('correlation', 0):.4f} (±{cv_results.get('correlation_std', 0):.4f})")
+#                print(f"  MSE: {cv_results.get('mse', 0):.4f} (±{cv_results.get('mse_std', 0):.4f})")
+#                print(f"  符号一致率: {cv_results.get('sign_accuracy', 0):.4f} (±{cv_results.get('sign_accuracy_std', 0):.4f})")
+#                print(f"  R2: {cv_results.get('r2', 0):.4f} (±{cv_results.get('r2_std', 0):.4f})")
+#                if 'auc_roc' in cv_results:
+#                    print(f"  AUC-ROC: {cv_results.get('auc_roc', 0):.4f} (±{cv_results.get('auc_roc_std', 0):.4f})")
+#            
+#            # 処置群の予測評価
+#            if 'treated_outcome_mse' in cv_results:
+#                avg_treated_size = cv_results.get('avg_treated_size', 0)
+#                print(f"\n  ====== 処置群の予測評価 (平均サンプル数: {avg_treated_size:.1f}, {args.folds}分割交差検証平均) ======")
+#                print(f"  MSE: {cv_results.get('treated_outcome_mse', 0):.4f} (±{cv_results.get('treated_outcome_mse_std', 0):.4f})")
+#                print(f"  R2: {cv_results.get('treated_outcome_r2', 0):.4f} (±{cv_results.get('treated_outcome_r2_std', 0):.4f})")
+#                if 'treated_outcome_accuracy' in cv_results:
+#                    print(f"  正解率: {cv_results.get('treated_outcome_accuracy', 0):.4f} (±{cv_results.get('treated_outcome_accuracy_std', 0):.4f})")
+#                if 'treated_outcome_auc_roc' in cv_results:
+#                    print(f"  AUC-ROC: {cv_results.get('treated_outcome_auc_roc', 0):.4f} (±{cv_results.get('treated_outcome_auc_roc_std', 0):.4f})")
+#                    print(f"  精度: {cv_results.get('treated_outcome_precision', 0):.4f} (±{cv_results.get('treated_outcome_precision_std', 0):.4f})")
+#                    print(f"  再現率: {cv_results.get('treated_outcome_recall', 0):.4f} (±{cv_results.get('treated_outcome_recall_std', 0):.4f})")
+#                    print(f"  F1スコア: {cv_results.get('treated_outcome_f1', 0):.4f} (±{cv_results.get('treated_outcome_f1_std', 0):.4f})")
+#                
+#                if 'treated_outcome_conf_mat' in cv_results:
+#                    conf_mat = cv_results.get('treated_outcome_conf_mat')
+#                    if conf_mat.size == 4:  # 2x2行列の場合
+#                        tn, fp, fn, tp = conf_mat.ravel()
+#                        total = tn + fp + fn + tp
+#                        print(f"  混同行列 (合計: {total}): [全fold合算]")
+#                        print(f"  [[{tn} {fp}]")
+#                        print(f"   [{fn} {tp}]]")
+#                        print(f"  TN={tn}, FP={fp}, FN={fn}, TP={tp}")
+#                    else:
+#                        print(f"  混同行列:\n{conf_mat}")
+#            
+#            # 非処置群の予測評価
+#            if 'control_outcome_mse' in cv_results:
+#                avg_control_size = cv_results.get('avg_control_size', 0)
+#                print(f"\n  ====== 非処置群の予測評価 (平均サンプル数: {avg_control_size:.1f}, {args.folds}分割交差検証平均) ======")
+#                print(f"  MSE: {cv_results.get('control_outcome_mse', 0):.4f} (±{cv_results.get('control_outcome_mse_std', 0):.4f})")
+#                print(f"  R2: {cv_results.get('control_outcome_r2', 0):.4f} (±{cv_results.get('control_outcome_r2_std', 0):.4f})")
+#                if 'control_outcome_accuracy' in cv_results:
+#                    print(f"  正解率: {cv_results.get('control_outcome_accuracy', 0):.4f} (±{cv_results.get('control_outcome_accuracy_std', 0):.4f})")
+#                if 'control_outcome_auc_roc' in cv_results:
+#                    print(f"  AUC-ROC: {cv_results.get('control_outcome_auc_roc', 0):.4f} (±{cv_results.get('control_outcome_auc_roc_std', 0):.4f})")
+#                    print(f"  精度: {cv_results.get('control_outcome_precision', 0):.4f} (±{cv_results.get('control_outcome_precision_std', 0):.4f})")
+#                    print(f"  再現率: {cv_results.get('control_outcome_recall', 0):.4f} (±{cv_results.get('control_outcome_recall_std', 0):.4f})")
+#                    print(f"  F1スコア: {cv_results.get('control_outcome_f1', 0):.4f} (±{cv_results.get('control_outcome_f1_std', 0):.4f})")
+#                
+#                if 'control_outcome_conf_mat' in cv_results:
+#                    conf_mat = cv_results.get('control_outcome_conf_mat')
+#                    if conf_mat.size == 4:  # 2x2行列の場合
+#                        tn, fp, fn, tp = conf_mat.ravel()
+#                        total = tn + fp + fn + tp
+#                        print(f"  混同行列 (合計: {total}): [全fold合算]")
+#                        print(f"  [[{tn} {fp}]")
+#                        print(f"   [{fn} {tp}]]")
+#                        print(f"  TN={tn}, FP={fp}, FN={fn}, TP={tp}")
+#                    else:
+#                        print(f"  混同行列:\n{conf_mat}")
+#            
+#            # 全体の予測評価
+#            if 'overall_outcome_mse' in cv_results:
+#                avg_test_size = cv_results.get('avg_test_size', 0)
+#                print(f"\n  ====== 全体の予測評価 (平均サンプル数: {avg_test_size:.1f}, {args.folds}分割交差検証平均) ======")
+#                print(f"  MSE: {cv_results.get('overall_outcome_mse', 0):.4f} (±{cv_results.get('overall_outcome_mse_std', 0):.4f})")
+#                print(f"  R2: {cv_results.get('overall_outcome_r2', 0):.4f} (±{cv_results.get('overall_outcome_r2_std', 0):.4f})")
+#                if 'overall_outcome_accuracy' in cv_results:
+#                    print(f"  正解率: {cv_results.get('overall_outcome_accuracy', 0):.4f} (±{cv_results.get('overall_outcome_accuracy_std', 0):.4f})")
+#                if 'overall_outcome_auc_roc' in cv_results:
+#                    print(f"  AUC-ROC: {cv_results.get('overall_outcome_auc_roc', 0):.4f} (±{cv_results.get('overall_outcome_auc_roc_std', 0):.4f})")
+#                    print(f"  精度: {cv_results.get('overall_outcome_precision', 0):.4f} (±{cv_results.get('overall_outcome_precision_std', 0):.4f})")
+#                    print(f"  再現率: {cv_results.get('overall_outcome_recall', 0):.4f} (±{cv_results.get('overall_outcome_recall_std', 0):.4f})")
+#                    print(f"  F1スコア: {cv_results.get('overall_outcome_f1', 0):.4f} (±{cv_results.get('overall_outcome_f1_std', 0):.4f})")
+#                
+#                if 'overall_outcome_conf_mat' in cv_results:
+#                    conf_mat = cv_results.get('overall_outcome_conf_mat')
+#                    if conf_mat.size == 4:  # 2x2行列の場合
+#                        tn, fp, fn, tp = conf_mat.ravel()
+#                        total = tn + fp + fn + tp
+#                        print(f"  混同行列 (合計: {total}): [全fold合算]")
+#                        print(f"  [[{tn} {fp}]")
+#                        print(f"   [{fn} {tp}]]")
+#                        print(f"  TN={tn}, FP={fp}, FN={fn}, TP={tp}")
+#                    else:
+#                        print(f"  混同行列:\n{conf_mat}")
+#            
+#            # 結果を整形して表示
+#            print(f"\n{model_type}:")
+#            for metric_name, value in cv_results.items():
+#                if isinstance(value, float):
+#                    print(f"  {metric_name}: {value:.4f}")
+#                else:
+#                    print(f"  {metric_name}: {value}")
+        
+        
         else:
             print(f"エラー: モデル{model_type}の学習関数がありません")
     

@@ -19,6 +19,80 @@ import causal_models
 from outcome_predictors import get_outcome_predictor, fallback_predict_outcomes
 from model_utils import get_model_trainer, ensure_dataframe, _binarize_predictions
 
+def evaluate_cv_with_top_n(model_trainer, X, outcome, treatment, fold_count=5, random_state=42, propensity_score=None):
+    """CVを使って予測ITEの上位N人評価を行う関数"""
+    from sklearn.model_selection import KFold
+    
+    # 実際にtreatment=1かつoutcome=1だった人数を計算
+    treatment_array = np.array(treatment)
+    outcome_array = np.array(outcome)
+    converted_mask = (treatment_array == 1) & (outcome_array == 1)
+    converted_count = np.sum(converted_mask)
+    
+    print(f"実際にtreatment=1かつoutcome=1だった人数: {converted_count}")
+    
+    # 結果を保存する配列
+    cv_predictions = []
+    cv_true_values = []
+    cv_treatments = []
+    cv_scores = []
+    
+    kf = KFold(n_splits=fold_count, random_state=random_state, shuffle=True)
+    
+    for train_idx, test_idx in kf.split(X):
+        # トレーニングデータとテストデータを分割
+        X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+        y_train, y_test = outcome.iloc[train_idx], outcome.iloc[test_idx]
+        w_train, w_test = treatment.iloc[train_idx], treatment.iloc[test_idx]
+        
+        # model_trainerを使ってモデルをトレーニング
+        fold_model = model_trainer(X_train, w_train, y_train, propensity_score=propensity_score)
+        
+        # テストデータでITE予測
+        ite_preds = fold_model.predict(X_test)
+        
+        # フォールドごとに評価
+        # 予測ITEの上位converted_count人を選択
+        sorted_indices = np.argsort(-ite_preds.flatten())
+        top_n_indices = sorted_indices[:converted_count]
+        
+        # そのフォールドでのtreatment=1かつoutcome=1の人数
+        fold_converted_mask = (w_test.values == 1) & (y_test.values == 1)
+        fold_converted_count = np.sum(fold_converted_mask)
+        
+        # 評価指標を計算
+        precision = np.sum(y_test.values[top_n_indices] * w_test.values[top_n_indices]) / converted_count if converted_count > 0 else 0
+        
+        # 結果を保存
+        cv_scores.append({
+            'precision': precision,
+            'fold_converted_count': fold_converted_count,
+            'top_n_converted': np.sum(y_test.values[top_n_indices] * w_test.values[top_n_indices])
+        })
+        
+        # フォールドごとの予測と実際の値を保存
+        cv_predictions.extend(ite_preds.flatten())
+        cv_true_values.extend(y_test.values)
+        cv_treatments.extend(w_test.values)
+    
+    # 結果を出力
+    print("\nCV評価 - 予測ITE上位N人での効果:")
+    print(f"  N = {converted_count} (treatment=1かつoutcome=1の人数)")
+    
+    avg_precision = np.mean([s['precision'] for s in cv_scores])
+    print(f"  平均精度（precision）: {avg_precision:.4f}")
+    
+    for i, score in enumerate(cv_scores):
+        print(f"  Fold {i+1}: 上位{converted_count}人中 {score['top_n_converted']}人が実際にコンバージョン (精度: {score['precision']:.4f})")
+    
+    return {
+        'cv_predictions': cv_predictions,
+        'cv_true_values': cv_true_values,
+        'cv_treatments': cv_treatments,
+        'cv_scores': cv_scores,
+        'avg_precision': avg_precision
+    }
+
 def evaluate_model_cv(X, treatment, outcome, true_ite=None, model_type='s_learner', 
                      learner_type='classification', propensity_score=None, n_splits=5, 
                      random_state=42, classification_threshold=0.5):
