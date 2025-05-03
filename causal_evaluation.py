@@ -8,6 +8,14 @@ from typing import Dict, List, Optional, Tuple, Union
 import lightgbm as lgb
 from sklearn.linear_model import LogisticRegression
 
+# 日本語フォント設定
+import matplotlib
+matplotlib.rcParams['font.family'] = 'sans-serif'
+# MacOSの場合はHiragino Sans、Windowsの場合はMS Gothicを使用
+matplotlib.rcParams['font.sans-serif'] = ['Hiragino Sans', 'Arial', 'MS Gothic', 'DejaVu Sans']
+# 負の値を表示するためのマイナス記号の設定
+matplotlib.rcParams['axes.unicode_minus'] = False
+
 def estimate_ate_with_ipw(y, t, p):
     """逆確率重み付け法でATEを推定する"""
     y1 = y[t == 1]
