@@ -6,7 +6,17 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from typing import Dict, List, Optional, Tuple, Union
 import lightgbm as lgb
+import warnings
 from sklearn.linear_model import LogisticRegression
+import sklearn
+
+# 警告は根本解決するので削除
+# warnings.filterwarnings("ignore", message="X does not have valid feature names")
+# warnings.filterwarnings("ignore", category=UserWarning, module="lightgbm")
+# warnings.filterwarnings("ignore", category=UserWarning, module="sklearn.utils.validation")
+# warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
+# warnings.filterwarnings("ignore", category=FutureWarning)
+# warnings.filterwarnings("ignore", message="The objective parameter is deprecated")
 
 # 日本語フォント設定
 import matplotlib
@@ -15,6 +25,15 @@ matplotlib.rcParams['font.family'] = 'sans-serif'
 matplotlib.rcParams['font.sans-serif'] = ['Hiragino Sans', 'Arial', 'MS Gothic', 'DejaVu Sans']
 # 負の値を表示するためのマイナス記号の設定
 matplotlib.rcParams['axes.unicode_minus'] = False
+
+def ensure_dataframe(X):
+    """入力をDataFrameに変換し、特徴量名を確保"""
+    if isinstance(X, pd.DataFrame):
+        return X
+    elif hasattr(X, 'columns'):  # numpyではなくpandasオブジェクト
+        return pd.DataFrame(X, columns=X.columns)
+    else:  # numpy配列
+        return pd.DataFrame(X, columns=[f'feature_{i}' for i in range(X.shape[1])])
 
 def estimate_ate_with_ipw(y, t, p):
     """逆確率重み付け法でATEを推定する"""
@@ -36,9 +55,24 @@ def estimate_ate_with_ipw(y, t, p):
     ate_ipw = weighted_y1 - weighted_y0
     return ate_ipw
 
-def compute_propensity_scores(X, treatment, method='lightgbm', clip_bounds=(0.05, 0.95)):
-    """複数の手法で傾向スコアを計算し、結果を返す"""
+def compute_propensity_scores(X, treatment, method='lightgbm', clip_bounds=(0.05, 0.95), oracle_score=None):
+    """複数の手法で傾向スコアを計算し、結果を返す
+    
+    Args:
+        X: 特徴量
+        treatment: 処置フラグ
+        method: 'lightgbm', 'logistic', 'all' のいずれか
+        clip_bounds: 傾向スコアの下限と上限
+        oracle_score: オラクルの傾向スコア（存在する場合）
+    """
     propensity_scores = {}
+    
+    # オラクルスコアがある場合は追加
+    if oracle_score is not None:
+        propensity_scores['oracle'] = oracle_score
+    
+    # DataFrameに変換
+    X_df = ensure_dataframe(X)
     
     if method == 'lightgbm' or method == 'all':
         # LightGBMによる傾向スコア計算
@@ -51,18 +85,19 @@ def compute_propensity_scores(X, treatment, method='lightgbm', clip_bounds=(0.05
             subsample=0.8,
             colsample_bytree=0.8,
             random_state=42,
+            verbose=-1,  # 警告メッセージを抑制
             objective='binary'
         )
-        ps_lgbm.fit(X, treatment)
-        p_score_lgbm_raw = ps_lgbm.predict_proba(X)[:, 1]
+        ps_lgbm.fit(X_df, treatment)
+        p_score_lgbm_raw = ps_lgbm.predict_proba(X_df)[:, 1]
         p_score_lgbm = np.clip(p_score_lgbm_raw, clip_bounds[0], clip_bounds[1])
         propensity_scores['lightgbm'] = p_score_lgbm
     
     if method == 'logistic' or method == 'all':
         # ロジスティック回帰による傾向スコア計算
         ps_logistic = LogisticRegression(random_state=42, max_iter=10000, solver='liblinear', C=0.1)
-        ps_logistic.fit(X, treatment)
-        p_score_logistic_raw = ps_logistic.predict_proba(X)[:, 1]
+        ps_logistic.fit(X_df, treatment)
+        p_score_logistic_raw = ps_logistic.predict_proba(X_df)[:, 1]
         p_score_logistic = np.clip(p_score_logistic_raw, clip_bounds[0], clip_bounds[1])
         propensity_scores['logistic'] = p_score_logistic
     

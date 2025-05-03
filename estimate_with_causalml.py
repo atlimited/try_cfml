@@ -7,10 +7,16 @@ import numpy as np
 import matplotlib.pyplot as plt
 import lightgbm as lgb
 import warnings
+from sklearn.metrics import accuracy_score
+from typing import Dict, Tuple, List, Optional, Union
 
 # 自作モジュールのインポート
 from data_preprocessing import prepare_data
-from causal_models import train_all_models
+from causal_models import (
+    train_all_models, 
+    evaluate_all_models_cv,
+    print_cv_results
+)
 from causal_evaluation import (
     compute_propensity_scores,
     estimate_ate_with_ipw,
@@ -20,8 +26,14 @@ from causal_evaluation import (
     plot_uplift_curve
 )
 
-# LightGBMの警告メッセージを抑制
-warnings.filterwarnings("ignore", category=UserWarning, module="lightgbm")
+def ensure_dataframe(X):
+    """入力をDataFrameに変換し、特徴量名を確保"""
+    if isinstance(X, pd.DataFrame):
+        return X
+    elif hasattr(X, 'columns'):  # numpyではなくpandasオブジェクト
+        return pd.DataFrame(X, columns=X.columns)
+    else:  # numpy配列
+        return pd.DataFrame(X, columns=[f'feature_{i}' for i in range(X.shape[1])])
 
 def main():
     # データ読み込み
@@ -38,8 +50,21 @@ def main():
     feature_level = 'minimal'
     df, X, treatment, outcome, oracle_info, feature_cols = prepare_data(df, feature_level)
 
+    print("X:\n", X)
+    print("treatment:\n", treatment)
+    print("outcome:\n", outcome)
+
+    # オラクルの傾向スコアを取得（存在する場合）
+    oracle_propensity = None
+    if 'propensity_score' in df.columns:
+        oracle_propensity = df['propensity_score'].values
+        # 極端な値を避けるためのクリッピング
+        oracle_propensity = np.clip(oracle_propensity, 0.05, 0.95)
+        print(f"\n===== オラクル傾向スコア情報 =====")
+        print(f"オラクル傾向スコアの統計: 最小値={oracle_propensity.min():.4f}, 最大値={oracle_propensity.max():.4f}, 平均={oracle_propensity.mean():.4f}")
+
     # 傾向スコアの計算（LightGBMとロジスティック回帰の両方）
-    propensity_scores = compute_propensity_scores(X, treatment, method='all')
+    propensity_scores = compute_propensity_scores(X, treatment, method='all', oracle_score=oracle_propensity)
     
     # LightGBM傾向スコアを使用
     p_score_lgbm = propensity_scores['lightgbm']
@@ -47,21 +72,34 @@ def main():
     
     # 傾向スコアの統計情報表示
     print("\n===== 複数の傾向スコア計算方法を比較 =====")
+    if 'oracle' in propensity_scores:
+        p_score_oracle = propensity_scores['oracle']
+        print(f"オラクル傾向スコアの統計: 最小値={p_score_oracle.min():.4f}, 最大値={p_score_oracle.max():.4f}, 平均={p_score_oracle.mean():.4f}")
+    
     print(f"LightGBM傾向スコアの統計: 最小値={p_score_lgbm.min():.4f}, 最大値={p_score_lgbm.max():.4f}, 平均={p_score_lgbm.mean():.4f}")
     print(f"Logistic傾向スコアの統計: 最小値={p_score_logistic.min():.4f}, 最大値={p_score_logistic.max():.4f}, 平均={p_score_logistic.mean():.4f}")
 
     # 傾向スコア単体でのATE評価（逆確率重み付け法）
-    ate_lgbm = estimate_ate_with_ipw(outcome, treatment, p_score_lgbm)
-    ate_logistic = estimate_ate_with_ipw(outcome, treatment, p_score_logistic)
-    observed_ate = df.groupby('treatment')['outcome'].mean().diff().iloc[-1]
+    print("\n===== 傾向スコアによるATE推定値 =====")
     true_ate = df['true_ite'].mean() if 'true_ite' in df.columns else None
-    
-    print(f"LightGBM傾向スコアによるIPW-ATE推定値: {ate_lgbm:.4f}")
-    print(f"Logistic傾向スコアによるIPW-ATE推定値: {ate_logistic:.4f}")
-    print(f"観測データからの素朴なATE推定値 (処置群vs対照群の平均の差): {observed_ate:.4f}")
     if true_ate is not None:
         print(f"真のATE (y1-y0の平均): {true_ate:.4f}")
-
+    
+    observed_ate = df.groupby('treatment')['outcome'].mean().diff().iloc[-1]
+    print(f"観測データからの素朴なATE推定値 (処置群vs対照群の平均の差): {observed_ate:.4f}")
+    
+    # オラクル傾向スコアがある場合、ATEも計算
+    if 'oracle' in propensity_scores:
+        p_score_oracle = propensity_scores['oracle']
+        ate_oracle = estimate_ate_with_ipw(outcome, treatment, p_score_oracle)
+        print(f"オラクル傾向スコアによるIPW-ATE推定値: {ate_oracle:.4f}")
+    
+    ate_lgbm = estimate_ate_with_ipw(outcome, treatment, p_score_lgbm)
+    print(f"LightGBM傾向スコアによるIPW-ATE推定値: {ate_lgbm:.4f}")
+    
+    ate_logistic = estimate_ate_with_ipw(outcome, treatment, p_score_logistic)
+    print(f"Logistic傾向スコアによるIPW-ATE推定値: {ate_logistic:.4f}")
+    
     # 今回使用する傾向スコア
     p_score = p_score_lgbm  # LightGBMの傾向スコアを使用
 
@@ -69,7 +107,7 @@ def main():
     print("\n===== 分類器と回帰器の両方を使ったモデル比較 =====")
     
     # すべてのモデルを学習・予測
-    model_results = train_all_models(X, treatment, outcome, p_score)
+    model_results = train_all_models(ensure_dataframe(X), treatment, outcome, p_score)
     
     # モデルの予測結果をデータフレームに格納
     for model_name, (model, predictions) in model_results.items():
@@ -84,10 +122,17 @@ def main():
         subsample=0.8,
         colsample_bytree=0.8,
         random_state=42,
+        verbose=-1,  # 警告メッセージを抑制
         objective='binary'
     )
-    outcome_predictor.fit(X, outcome)
-    df['predicted_outcome'] = outcome_predictor.predict_proba(X)[:, 1]
+    
+    # DataFrameとして渡す
+    X_df = ensure_dataframe(X)
+    outcome_predictor.fit(X_df, outcome)
+    
+    # 各個人に対する予測値（ITEの予測）- 特徴量名が適切に扱われるように修正
+    raw_outcome_prediction = outcome_predictor.predict_proba(X_df)[:, 1]
+    df['predicted_outcome'] = raw_outcome_prediction
 
     # ===== モデル評価 =====
     # モデル名のリスト
@@ -257,6 +302,52 @@ def main():
         )
     except Exception as e:
         print(f"可視化中にエラーが発生しました: {e}")
+
+    # ===== k-foldクロスバリデーションによるモデル評価 =====
+    if 'true_ite' in df.columns:
+        print("\n===== クロスバリデーションによるモデル評価 =====")
+        cv_results = evaluate_all_models_cv(
+            X, treatment, outcome, 
+            true_ite=df['true_ite'], 
+            propensity_score=p_score,
+            n_splits=5, 
+            random_state=42
+        )
+        print_cv_results(cv_results)
+        
+        # グループ別のクロスバリデーション評価
+        print("\n===== グループ別のクロスバリデーション評価 =====")
+        if 'response_group' in df.columns:
+            groups = df['response_group'].unique()
+            groups.sort()
+            
+            for group in groups:
+                print(f"\nグループ{group}の評価:")
+                group_mask = df['response_group'] == group
+                
+                # このグループのデータだけを抽出
+                X_group = X[group_mask]
+                treatment_group = treatment[group_mask]
+                outcome_group = outcome[group_mask]
+                true_ite_group = df['true_ite'][group_mask]
+                p_score_group = p_score[group_mask] if p_score is not None else None
+                
+                # サンプル数が少なすぎる場合はスキップ
+                if len(X_group) < 100:
+                    print(f"  サンプル数 ({len(X_group)}) が少なすぎるため評価をスキップします")
+                    continue
+                
+                # このグループだけでクロスバリデーション評価（サンプル数に応じてsplitsを調整）
+                n_splits = min(5, len(X_group) // 20)  # 各分割に最低20サンプルは欲しい
+                
+                cv_results_group = evaluate_all_models_cv(
+                    X_group, treatment_group, outcome_group,
+                    true_ite=true_ite_group, 
+                    propensity_score=p_score_group,
+                    n_splits=n_splits, 
+                    random_state=42
+                )
+                print_cv_results(cv_results_group)
 
 if __name__ == "__main__":
     main()
