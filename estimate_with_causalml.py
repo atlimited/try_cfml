@@ -47,11 +47,19 @@ df['marketing_price_interaction'] = df['marketing_receptivity'] * df['price_sens
 
 # 特徴量、処置、アウトカムを定義
 feature_cols = [
-    'age_scaled', 'homeownership_scaled', 'age_squared', 'age_home',
-    'age_over_60', 'age_30_to_60', 'age_over_40',
-    'marketing_receptivity', 'price_sensitivity',
-    'group1_score', 'group2_score', 'group3_score',
-    'marketing_price_interaction'
+    'age_scaled',
+    'homeownership_scaled',
+#    'age_squared',
+#    'age_home',
+#    'age_over_60',
+#    'age_30_to_60',
+#    'age_over_40',
+#    'marketing_receptivity',
+#    'price_sensitivity',
+#    'group1_score',
+#    'group2_score',
+#    'group3_score',
+#    'marketing_price_interaction'
 ]
 X = df[feature_cols]
 treatment = df['treatment']
@@ -60,11 +68,6 @@ outcome = df['outcome']
 # LightGBMの警告メッセージを抑制
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="lightgbm")
-
-# 傾向スコアモデル
-propensity_model = LogisticRegression(random_state=42, max_iter=10000, solver='liblinear', C=0.1)
-propensity_model.fit(X, treatment)
-p_score = propensity_model.predict_proba(X)[:, 1]
 
 # LightGBMの共通パラメータ
 lgb_params = {
@@ -79,39 +82,59 @@ lgb_params = {
     'verbose': -1  # 警告メッセージを抑制
 }
 
+# LightGBMの分類器パラメータ
+lgb_cls_params = {
+    'n_estimators': 300,
+    'learning_rate': 0.05,
+    'num_leaves': 31,
+    'max_depth': 8,
+    'min_child_samples': 20,
+    'subsample': 0.8,
+    'colsample_bytree': 0.8,
+    'random_state': 42,
+    'verbose': -1,
+    'objective': 'binary'  # バイナリ分類
+}
+
 # カテゴリカル特徴量の指定
 categorical_features = ['age_over_60', 'age_30_to_60', 'age_over_40', 'homeownership']
 
 # 単純なoutcome予測モデル - 全データでアウトカムを予測（treatmentは特徴量として使わない）
-outcome_predictor = lgb.LGBMRegressor(**lgb_params)
+outcome_predictor = lgb.LGBMClassifier(**lgb_cls_params)
 outcome_predictor.fit(X, outcome)  # 全データで学習（treatmentは特徴量に含まれていない）
-df['predicted_outcome'] = outcome_predictor.predict(X)
+df['predicted_outcome'] = outcome_predictor.predict_proba(X)[:, 1]  # 確率値（クラス1の確率）を取得
 
-# 1. S-Learner（単一モデルに処置を特徴量として含める）
+# 傾向スコアモデルを分類器に変更（より適切）
+propensity_model = LogisticRegression(random_state=42, max_iter=10000, solver='liblinear', C=0.1)
+propensity_model.fit(X, treatment)
+p_score = propensity_model.predict_proba(X)[:, 1]
+
+# 1. S-Learner（単一モデルに処置を特徴量として含める）- 分類器版
 s_learner = BaseSRegressor(
-    learner=lgb.LGBMRegressor(**lgb_params)
+    learner=lgb.LGBMClassifier(**lgb_cls_params)
 )
 s_learner.fit(X=X, treatment=treatment, y=outcome)
 te_s = s_learner.predict(X=X, p=p_score)
 df['ite_s_learner'] = te_s
 
-# 2. T-Learner（処置群と対照群で別々のモデル）
+# 2. T-Learner（処置群と対照群で別々のモデル）- 分類器版
 t_learner = BaseTRegressor(
-    learner=lgb.LGBMRegressor(**lgb_params)
+    learner=lgb.LGBMClassifier(**lgb_cls_params)
 )
 t_learner.fit(X=X, treatment=treatment, y=outcome)
-te_t = t_learner.predict(X=X, p=p_score)
+te_t = t_learner.predict(X=X)
 df['ite_t_learner'] = te_t
 
-# 3. X-Learner（両方向の処置効果を推定して組み合わせる）
+# 3. X-Learner（T-Learnerを拡張し、異質性を考慮）- 回帰器版
 x_learner = BaseXRegressor(
     learner=lgb.LGBMRegressor(**lgb_params)
 )
-x_learner.fit(X=X, treatment=treatment, y=outcome)
-te_x = x_learner.predict(X=X, p=p_score)
+# 傾向スコアを明示的に渡す
+x_learner.fit(X=X, treatment=treatment, y=outcome, p=p_score)
+te_x = x_learner.predict(X=X, p=p_score)  # 予測時にも傾向スコアを渡す
 df['ite_x_learner'] = te_x
 
-# 4. R-Learner（残差ベースのアプローチ）
+# 4. R-Learner（バイアス低減のための直交化を使用）- 回帰器版
 r_learner = BaseRRegressor(
     learner=lgb.LGBMRegressor(**lgb_params)
 )
@@ -119,14 +142,14 @@ r_learner.fit(X=X, treatment=treatment, y=outcome, p=p_score)
 te_r = r_learner.predict(X=X)
 df['ite_r_learner'] = te_r
 
-# 5. DR-Learner（Doubly Robust推定）
+# 5. DR-Learner（Doubly Robust推定量に基づく学習）- 回帰器版
 dr_learner = BaseDRLearner(
     learner=lgb.LGBMRegressor(**lgb_params),
     control_outcome_learner=lgb.LGBMRegressor(**lgb_params),
     treatment_outcome_learner=lgb.LGBMRegressor(**lgb_params),
     treatment_effect_learner=lgb.LGBMRegressor(**lgb_params)
 )
-dr_learner.fit(X=X, treatment=treatment, y=outcome)
+dr_learner.fit(X=X, treatment=treatment, y=outcome, p=p_score)  # 傾向スコアを明示的に渡す
 te_dr = dr_learner.predict(X=X)
 df['ite_dr_learner'] = te_dr
 
