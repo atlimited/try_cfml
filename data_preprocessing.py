@@ -71,6 +71,11 @@ def create_features(df, additional_features=True):
 def get_feature_sets(feature_level='minimal'):
     """特徴量セットの定義を取得"""
     feature_sets = {
+        'original': [
+            'age',
+            'homeownership',
+            #"response_group",
+        ],
         'minimal': [
             'age_scaled',
             'homeownership_scaled'

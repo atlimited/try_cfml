@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 import lightgbm as lgb
 import warnings
-from causalml.inference.meta import BaseSRegressor, BaseTRegressor, BaseXRegressor, BaseRRegressor, BaseDRLearner
+from causalml.inference.meta import BaseSClassifier, BaseSRegressor, BaseTClassifier, BaseTRegressor, BaseXRegressor, BaseRRegressor, BaseDRLearner
 from sklearn.model_selection import KFold
 from sklearn.metrics import mean_squared_error, r2_score
 
@@ -40,7 +40,7 @@ def ensure_dataframe(X):
 def train_s_learner(X, treatment, outcome, model_type='classification', propensity_score=None, test_data=None):
     """S-Learnerモデルの学習と予測"""
     if model_type == 'classification':
-        model = BaseSRegressor(learner=lgb.LGBMClassifier(**get_model_params('classification')))
+        model = BaseSClassifier(learner=lgb.LGBMClassifier(**get_model_params('classification')))
     else:
         model = BaseSRegressor(learner=lgb.LGBMRegressor(**get_model_params('regression')))
     
@@ -49,25 +49,27 @@ def train_s_learner(X, treatment, outcome, model_type='classification', propensi
     
     # モデル学習
     model.fit(X=X_df, treatment=treatment, y=outcome)
+
+    return model
     
-    # 予測（傾向スコアがあれば使用）- 必ずDataFrameで渡す
-    if propensity_score is not None:
-        if test_data is None:
-            predictions = model.predict(X=X_df, p=propensity_score)
-        else:
-            predictions = model.predict(X=ensure_dataframe(test_data), p=propensity_score)
-    else:
-        if test_data is None:
-            predictions = model.predict(X=X_df)
-        else:
-            predictions = model.predict(X=ensure_dataframe(test_data))
-    
-    return model, predictions
+#    # 予測（傾向スコアがあれば使用）- 必ずDataFrameで渡す
+#    if propensity_score is not None:
+#        if test_data is None:
+#            predictions = model.predict(X=X_df, p=propensity_score)
+#        else:
+#            predictions = model.predict(X=ensure_dataframe(test_data), p=propensity_score)
+#    else:
+#        if test_data is None:
+#            predictions = model.predict(X=X_df)
+#        else:
+#            predictions = model.predict(X=ensure_dataframe(test_data))
+#    
+#    return model, predictions
 
 def train_t_learner(X, treatment, outcome, model_type='classification', test_data=None):
     """T-Learnerモデルの学習と予測"""
     if model_type == 'classification':
-        model = BaseTRegressor(learner=lgb.LGBMClassifier(**get_model_params('classification')))
+        model = BaseTClassifier(learner=lgb.LGBMClassifier(**get_model_params('classification')))
     else:
         model = BaseTRegressor(learner=lgb.LGBMRegressor(**get_model_params('regression')))
     
@@ -76,14 +78,16 @@ def train_t_learner(X, treatment, outcome, model_type='classification', test_dat
     
     # モデル学習
     model.fit(X=X_df, treatment=treatment, y=outcome)
+
+    return model
     
-    # 予測 - 必ずDataFrameで渡す
-    if test_data is None:
-        predictions = model.predict(X=X_df)
-    else:
-        predictions = model.predict(X=ensure_dataframe(test_data))
-    
-    return model, predictions
+#    # 予測 - 必ずDataFrameで渡す
+#    if test_data is None:
+#        predictions = model.predict(X=X_df)
+#    else:
+#        predictions = model.predict(X=ensure_dataframe(test_data))
+#    
+#    return model, predictions
 
 def train_x_learner(X, treatment, outcome, propensity_score=None, test_data=None):
     """X-Learnerモデルの学習と予測"""
@@ -94,20 +98,22 @@ def train_x_learner(X, treatment, outcome, propensity_score=None, test_data=None
     
     # モデル学習
     model.fit(X=X_df, treatment=treatment, y=outcome)
+
+    return model
     
-    # 予測（傾向スコアがあれば使用）- 必ずDataFrameで渡す
-    if propensity_score is not None:
-        if test_data is None:
-            predictions = model.predict(X=X_df, p=propensity_score)
-        else:
-            predictions = model.predict(X=ensure_dataframe(test_data), p=propensity_score)
-    else:
-        if test_data is None:
-            predictions = model.predict(X=X_df)
-        else:
-            predictions = model.predict(X=ensure_dataframe(test_data))
-    
-    return model, predictions
+#    # 予測（傾向スコアがあれば使用）- 必ずDataFrameで渡す
+#    if propensity_score is not None:
+#        if test_data is None:
+#            predictions = model.predict(X=X_df, p=propensity_score)
+#        else:
+#            predictions = model.predict(X=ensure_dataframe(test_data), p=propensity_score)
+#    else:
+#        if test_data is None:
+#            predictions = model.predict(X=X_df)
+#        else:
+#            predictions = model.predict(X=ensure_dataframe(test_data))
+#    
+#    return model, predictions
 
 def train_r_learner(X, treatment, outcome, test_data=None):
     """R-Learnerモデルの学習と予測"""
@@ -118,32 +124,40 @@ def train_r_learner(X, treatment, outcome, test_data=None):
     
     # モデル学習
     model.fit(X=X_df, treatment=treatment, y=outcome)
-    
-    # 予測 - 必ずDataFrameで渡す
-    if test_data is None:
-        predictions = model.predict(X=X_df)
-    else:
-        predictions = model.predict(X=ensure_dataframe(test_data))
-    
-    return model, predictions
 
-def train_dr_learner(X, treatment, outcome, propensity_score, test_data=None):
+    return model
+    
+#    # 予測 - 必ずDataFrameで渡す
+#    if test_data is None:
+#        predictions = model.predict(X=X_df)
+#    else:
+#        predictions = model.predict(X=ensure_dataframe(test_data))
+#    
+#    return model, predictions
+
+def train_dr_learner(X, treatment, outcome, propensity_score=None, test_data=None):
     """DR-Learner (Doubly Robust) モデルの学習と予測"""
     model = BaseDRLearner(learner=lgb.LGBMRegressor(**get_model_params('regression')))
     
     # DataFrameに変換
     X_df = ensure_dataframe(X)
     
-    # モデル学習
-    model.fit(X=X_df, treatment=treatment, y=outcome, p=propensity_score)
-    
-    # 予測 - 必ずDataFrameで渡す
-    if test_data is None:
-        predictions = model.predict(X=X_df)
+    # モデル学習 - 傾向スコアがある場合のみ使用
+    if propensity_score is not None:
+        model.fit(X=X_df, treatment=treatment, y=outcome, p=propensity_score)
     else:
-        predictions = model.predict(X=ensure_dataframe(test_data))
+        # 傾向スコアなしの場合は内部で推定
+        model.fit(X=X_df, treatment=treatment, y=outcome)
+
+    return model
     
-    return model, predictions
+#    # 予測 - 必ずDataFrameで渡す
+#    if test_data is None:
+#        predictions = model.predict(X=X_df)
+#    else:
+#        predictions = model.predict(X=ensure_dataframe(test_data))
+#    
+#    return model, predictions
 
 def train_all_models(X, treatment, outcome, propensity_score):
     """すべてのモデルを学習し、予測を返す"""

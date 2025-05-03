@@ -7,15 +7,22 @@ import numpy as np
 import matplotlib.pyplot as plt
 import lightgbm as lgb
 import warnings
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import accuracy_score, mean_squared_error, r2_score, roc_auc_score, precision_score, recall_score, f1_score
+from scipy.stats import pearsonr
 from typing import Dict, Tuple, List, Optional, Union
+import argparse
+from tqdm import tqdm
 
 # 自作モジュールのインポート
 from data_preprocessing import prepare_data
 from causal_models import (
-    train_all_models, 
+    train_all_models
+)
+from model_evaluation import (
     evaluate_all_models_cv,
-    print_cv_results
+    print_cv_results,
+    run_cv_with_statistics,
+    evaluate_model_cv
 )
 from causal_evaluation import (
     compute_propensity_scores,
@@ -25,17 +32,125 @@ from causal_evaluation import (
     evaluate_policy_efficiency,
     plot_uplift_curve
 )
+from outcome_predictors import (
+    train_outcome_predictor
+)
+from model_utils import (
+    ensure_dataframe,
+    get_model_trainer
+)
 
-def ensure_dataframe(X):
-    """入力をDataFrameに変換し、特徴量名を確保"""
-    if isinstance(X, pd.DataFrame):
-        return X
-    elif hasattr(X, 'columns'):  # numpyではなくpandasオブジェクト
-        return pd.DataFrame(X, columns=X.columns)
-    else:  # numpy配列
-        return pd.DataFrame(X, columns=[f'feature_{i}' for i in range(X.shape[1])])
+def estimate_ate_with_propensity_scores(df, X, treatment, outcome):
+    """
+    傾向スコアを用いたATE推定
+    """
+    # 傾向スコアによるATE推定
+    print("\n===== 傾向スコアによるATE推定値 =====")
+    true_ate = df['true_ite'].mean() if 'true_ite' in df.columns else None
+    if true_ate is not None:
+        print(f"真のATE (y1-y0の平均): {true_ate:.4f}")
+    
+    # 観測データからの素朴なATE計算
+    observed_ate = df.groupby('treatment')['outcome'].mean().diff().iloc[-1]
+    print(f"観測データからの素朴なATE推定値 (処置群vs対照群の平均の差): {observed_ate:.4f}")
+    
+    # 傾向スコアの取得
+    propensity_score = df['propensity_score'].values
+    
+    # LightGBM傾向スコアを使用
+    from causal_evaluation import compute_propensity_scores, estimate_ate_with_ipw
+    
+    # LightGBM傾向スコアの計算
+    p_score_lgbm = compute_propensity_scores(X, treatment, method='lightgbm')
+    
+    # Logistic傾向スコアの計算
+    p_score_logistic = compute_propensity_scores(X, treatment, method='logistic')
+    
+    # Seriesを配列に変換して渡す
+    treatment_array = treatment.values if hasattr(treatment, 'values') else np.array(treatment)
+    outcome_array = outcome.values if hasattr(outcome, 'values') else np.array(outcome)
+    
+    # IPWでATEを推定
+    if 'propensity_score' in df.columns:
+        ate_oracle = estimate_ate_with_ipw(outcome_array, treatment_array, propensity_score)
+        print(f"オラクル傾向スコアによるIPW-ATE推定値: {ate_oracle:.4f}")
+    
+    ate_lgbm = estimate_ate_with_ipw(outcome_array, treatment_array, p_score_lgbm)
+    print(f"LightGBM傾向スコアによるIPW-ATE推定値: {ate_lgbm:.4f}")
+    
+    ate_logistic = estimate_ate_with_ipw(outcome_array, treatment_array, p_score_logistic)
+    print(f"Logistic傾向スコアによるIPW-ATE推定値: {ate_logistic:.4f}")
+    
+    # 傾向スコアを返す（後続の処理で使用するため）
+    return p_score_lgbm
+
+def compare_propensity_scores(X, treatment, oracle_score=None):
+    """異なる手法で傾向スコアを計算して比較"""
+    propensity_scores = {}
+    
+    # オラクルスコア
+    if oracle_score is not None:
+        propensity_scores['oracle'] = oracle_score
+        print(f"オラクル傾向スコアの統計: 最小値={oracle_score.min():.4f}, 最大値={oracle_score.max():.4f}, 平均={oracle_score.mean():.4f}")
+    
+    # LightGBM傾向スコア
+    from causal_evaluation import compute_propensity_scores
+    p_score_lgbm = compute_propensity_scores(X, treatment, method='lightgbm')
+    propensity_scores['lightgbm'] = p_score_lgbm
+    print(f"LightGBM傾向スコアの統計: 最小値={p_score_lgbm.min():.4f}, 最大値={p_score_lgbm.max():.4f}, 平均={p_score_lgbm.mean():.4f}")
+    
+    # Logistic傾向スコア
+    p_score_logistic = compute_propensity_scores(X, treatment, method='logistic')
+    propensity_scores['logistic'] = p_score_logistic
+    print(f"Logistic傾向スコアの統計: 最小値={p_score_logistic.min():.4f}, 最大値={p_score_logistic.max():.4f}, 平均={p_score_logistic.mean():.4f}")
+    
+    return propensity_scores
 
 def main():
+    """
+    メイン関数
+    """
+    # コマンドライン引数の設定
+    parser = argparse.ArgumentParser(description='CausalMLを使った因果推論モデルの評価')
+    parser.add_argument('--model', type=str, default=None,
+                      help='評価するモデル名（従来方式: s_learner_classification, t_learner_regression等）')
+    parser.add_argument('--model-type', type=str, default=None,
+                      help='評価するモデルタイプ (s_learner, t_learner, x_learner, r_learner, dr_learner)')
+    parser.add_argument('--learner-type', type=str, default=None,
+                      help='評価する学習器タイプ (classification, regression)')
+    parser.add_argument('--cv', action='store_true',
+                      help='クロスバリデーションを実行するかどうか')
+    parser.add_argument('--threshold', type=float, default=0.5,
+                      help='分類評価に使用する閾値（デフォルト: 0.5）')
+    parser.add_argument('--folds', type=int, default=2,
+                      help='交差検証のfold数（デフォルト: 2）')
+    args = parser.parse_args()
+    
+    # モデル名の決定（新方式と旧方式の両方をサポート）
+    if args.model is not None:
+        # model引数が指定された場合
+        if args.model.endswith('_classification') or args.model.endswith('_regression'):
+            # すでに完全な形式（例：'s_learner_classification'）
+            model_type = args.model
+            base_model_type, learner_type = args.model.rsplit('_', 1)
+        else:
+            # モデル名のみ指定された場合（例：'s_learner'）
+            base_model_type = args.model
+            learner_type = args.learner_type if args.learner_type else 'classification'
+            model_type = f"{base_model_type}_{learner_type}"
+    elif args.model_type is not None:
+        # モデルタイプが指定された場合
+        base_model_type = args.model_type
+        learner_type = args.learner_type if args.learner_type else 'classification'
+        model_type = f"{base_model_type}_{learner_type}"
+    else:
+        # デフォルト値
+        base_model_type = "s_learner"
+        learner_type = "classification"
+        model_type = f"{base_model_type}_{learner_type}"
+    
+    print(f"\n===== {model_type}モデルの評価を開始 =====")
+    
     # データ読み込み
     df = pd.read_csv("df.csv")
 
@@ -47,7 +162,8 @@ def main():
 
     # データの前処理
     # 基本的特徴量のみ使用する場合は'minimal'、すべての特徴量を使用する場合は'full'
-    feature_level = 'minimal'
+    #feature_level = 'minimal'
+    feature_level = 'original'
     df, X, treatment, outcome, oracle_info, feature_cols = prepare_data(df, feature_level)
 
     print("X:\n", X)
@@ -64,7 +180,7 @@ def main():
         print(f"オラクル傾向スコアの統計: 最小値={oracle_propensity.min():.4f}, 最大値={oracle_propensity.max():.4f}, 平均={oracle_propensity.mean():.4f}")
 
     # 傾向スコアの計算（LightGBMとロジスティック回帰の両方）
-    propensity_scores = compute_propensity_scores(X, treatment, method='all', oracle_score=oracle_propensity)
+    propensity_scores = compare_propensity_scores(X, treatment, oracle_score=oracle_propensity)
     
     # LightGBM傾向スコアを使用
     p_score_lgbm = propensity_scores['lightgbm']
@@ -79,275 +195,226 @@ def main():
     print(f"LightGBM傾向スコアの統計: 最小値={p_score_lgbm.min():.4f}, 最大値={p_score_lgbm.max():.4f}, 平均={p_score_lgbm.mean():.4f}")
     print(f"Logistic傾向スコアの統計: 最小値={p_score_logistic.min():.4f}, 最大値={p_score_logistic.max():.4f}, 平均={p_score_logistic.mean():.4f}")
 
-    # 傾向スコア単体でのATE評価（逆確率重み付け法）
-    print("\n===== 傾向スコアによるATE推定値 =====")
-    true_ate = df['true_ite'].mean() if 'true_ite' in df.columns else None
-    if true_ate is not None:
-        print(f"真のATE (y1-y0の平均): {true_ate:.4f}")
+    # 傾向スコアによるATE推定
+    p_score = estimate_ate_with_propensity_scores(df, X, treatment, outcome)
     
-    observed_ate = df.groupby('treatment')['outcome'].mean().diff().iloc[-1]
-    print(f"観測データからの素朴なATE推定値 (処置群vs対照群の平均の差): {observed_ate:.4f}")
-    
-    # オラクル傾向スコアがある場合、ATEも計算
-    if 'oracle' in propensity_scores:
-        p_score_oracle = propensity_scores['oracle']
-        ate_oracle = estimate_ate_with_ipw(outcome, treatment, p_score_oracle)
-        print(f"オラクル傾向スコアによるIPW-ATE推定値: {ate_oracle:.4f}")
-    
-    ate_lgbm = estimate_ate_with_ipw(outcome, treatment, p_score_lgbm)
-    print(f"LightGBM傾向スコアによるIPW-ATE推定値: {ate_lgbm:.4f}")
-    
-    ate_logistic = estimate_ate_with_ipw(outcome, treatment, p_score_logistic)
-    print(f"Logistic傾向スコアによるIPW-ATE推定値: {ate_logistic:.4f}")
-    
-    # 今回使用する傾向スコア
-    p_score = p_score_lgbm  # LightGBMの傾向スコアを使用
-
-    # ===== 分類器と回帰器の両方を使ったモデル比較 =====
-    print("\n===== 分類器と回帰器の両方を使ったモデル比較 =====")
-    
-    # すべてのモデルを学習・予測
-    model_results = train_all_models(ensure_dataframe(X), treatment, outcome, p_score)
-    
-    # モデルの予測結果をデータフレームに格納
-    for model_name, (model, predictions) in model_results.items():
-        df[f'ite_{model_name}'] = predictions
-    
-    # 単純なoutcome予測モデル - 全データでアウトカムを予測（treatmentは特徴量として使わない）
-    outcome_predictor = lgb.LGBMClassifier(
-        n_estimators=100,
-        learning_rate=0.05,
-        num_leaves=31, 
-        max_depth=5,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        random_state=42,
-        verbose=-1,  # 警告メッセージを抑制
-        objective='binary'
-    )
-    
-    # DataFrameとして渡す
-    X_df = ensure_dataframe(X)
-    outcome_predictor.fit(X_df, outcome)
-    
-    # 各個人に対する予測値（ITEの予測）- 特徴量名が適切に扱われるように修正
-    raw_outcome_prediction = outcome_predictor.predict_proba(X_df)[:, 1]
-    df['predicted_outcome'] = raw_outcome_prediction
-
-    # ===== モデル評価 =====
-    # モデル名のリスト
-    model_names = ['s_learner_cls', 't_learner_cls', 's_learner_reg', 't_learner_reg', 
-                   'x_learner', 'r_learner', 'dr_learner']
-    
-    # 1. ATE評価
-    print("\n===== 各モデルのATE推定値 =====")
-    print(f"真のATE (y1-y0の平均): {true_ate:.4f}")
-    print(f"観測データからの素朴なATE推定値 (処置群vs対照群の平均の差): {observed_ate:.4f}")
-    print(f"LightGBM傾向スコアによるIPW-ATE推定値: {ate_lgbm:.4f}")
-    print(f"Logistic傾向スコアによるIPW-ATE推定値: {ate_logistic:.4f}")
-    
-    for model_name in model_names:
-        ite_col = f'ite_{model_name}'
-        print(f"{model_name}: {df[ite_col].mean():.4f}")
-    
-    # 2. ITE評価（相関係数、MSE、MAE）
-    print("\n===== 各モデルのITE相関係数 (真のITEとの相関) =====")
-    for model_name in model_names:
-        ite_col = f'ite_{model_name}'
-        # 真のITEとの相関を計算
-        oracle_corr = df[ite_col].corr(df['true_ite'])
-        oracle_mse = ((df['true_ite'] - df[ite_col]) ** 2).mean()
-        oracle_mae = abs(df['true_ite'] - df[ite_col]).mean()
-        print(f"{model_name}: 相関係数 = {oracle_corr:.4f}, MSE = {oracle_mse:.4f}, MAE = {oracle_mae:.4f}")
-    
-    # 3. グループ別の予測精度
-    print("\n===== グループ別の予測精度 =====")
-    if 'response_group' in df.columns:
-        for group in sorted(df['response_group'].unique()):
-            group_df = df[df['response_group'] == group]
-            print(f"グループ{group}:")
-            print(f"  サンプル数: {len(group_df)}")
-            print(f"  平均真のITE: {group_df['true_ite'].mean():.4f}")
+    # ここから、指定したモデルだけを評価するように変更
+    # 分類器と回帰器のモデル比較部分は、指定したモデルのみ実行
+    if args.model or (args.model_type and args.learner_type):
+        # クロスバリデーションを実行する場合
+        if args.cv:
+            print(f"\n===== {model_type}のクロスバリデーション評価 =====")
             
-            # 各モデルのグループ平均ITE
-            for model_name in model_names:
-                ite_col = f'ite_{model_name}'
-                pred_mean = group_df[ite_col].mean()
-                corr = group_df['true_ite'].corr(group_df[ite_col]) if len(group_df) > 1 else float('nan')
-                print(f"  {model_name}: {pred_mean:.4f} (相関: {corr:.4f}, 真値との差: {pred_mean-group_df['true_ite'].mean():.4f})")
-    
-    # 4. グループ別のITE合計
-    print("\n===== グループ別のITE合計 =====")
-    if 'response_group' in df.columns:
-        total_true_ite = df['true_ite'].sum()
-        print(f"全体の真のITE合計: {total_true_ite:.2f}")
-        for group in sorted(df['response_group'].unique()):
-            group_df = df[df['response_group'] == group]
-            group_size = len(group_df)
-            true_ite_sum = group_df['true_ite'].sum()
-            true_ite_contribution = true_ite_sum / total_true_ite * 100 if total_true_ite != 0 else 0
-            print(f"グループ{group} ({group_size}人):")
-            print(f"  真のITE合計: {true_ite_sum:.2f} (寄与率: {true_ite_contribution:.2f}%)")
+            # 既に上で base_model_type と learner_type が設定されているので、
+            # ここでは再分離しない
             
-            # 各モデルのグループ別ITE合計
-            for model_name in model_names:
-                ite_col = f'ite_{model_name}'
-                print(f"  {model_name}: {group_df[ite_col].sum():.2f}")
-    
-    # 5. 上位N人処置の効果
-    print("\n===== 上位N人処置の効果 =====")
-    top_ns = [1000, 2000, 4000, 6000, 8000, 10000]
-    
-    # オラクル（真のITEでソート）
-    print("オラクル（真のITEでソート）:")
-    for n in top_ns:
-        # 真のITEでソート
-        oracle_indices = df['true_ite'].nlargest(n).index
-        oracle_effect = df.loc[oracle_indices, 'true_ite'].sum()
-        print(f"  上位{n}人処置: 効果合計 = {oracle_effect:.2f}, 平均効果 = {oracle_effect/n:.4f}")
-    
-    # 各モデルの予測による上位N人処置の効果と真の効果の比較
-    for model_name in model_names:
-        ite_col = f'ite_{model_name}'
-        print(f"\n{model_name}の予測による処置:")
-        for n in top_ns:
-            # 予測ITEでソート
-            pred_indices = df[ite_col].nlargest(n).index
-            pred_effect = df.loc[pred_indices, ite_col].sum()  # モデルの予測効果
-            true_effect = df.loc[pred_indices, 'true_ite'].sum()  # 実際の効果
-            oracle_effect = df['true_ite'].nlargest(n).sum()  # オラクル効果
-            optimal_ratio = true_effect / oracle_effect if oracle_effect != 0 else 0
-            print(f"  上位{n}人処置: 予測効果 = {pred_effect:.2f}, 実際の効果 = {true_effect:.2f}, 最適比 = {optimal_ratio:.2f}")
-    
-    # 単純なoutcome予測モデルによる上位N人処置の効果
-    print("\n単純なoutcome予測モデルによる処置:")
-    for n in top_ns:
-        # 予測アウトカムでソート
-        pred_indices = df['predicted_outcome'].nlargest(n).index
-        true_effect = df.loc[pred_indices, 'true_ite'].sum()
-        oracle_effect = df['true_ite'].nlargest(n).sum()  # オラクル効果
-        optimal_ratio = true_effect / oracle_effect if oracle_effect != 0 else 0
-        print(f"  上位{n}人処置: 実際の効果 = {true_effect:.2f}, 最適比 = {optimal_ratio:.2f}")
-    
-    # 6. 各モデルの正負判定精度
-    print("\n===== 各モデルの正負判定精度 =====")
-    df['true_uplift_pos'] = (df['true_ite'] > 0).astype(int)  # 真のITEが正の場合を1とする
-    
-    for model_name in model_names:
-        ite_col = f'ite_{model_name}'
-        df[f'{model_name}_pos'] = (df[ite_col] > 0).astype(int)
-        accuracy = (df[f'{model_name}_pos'] == df['true_uplift_pos']).mean()
-        print(f"{model_name}: 全体正負判定精度 = {accuracy:.4f}")
+            from model_evaluation import evaluate_model_cv
+            
+            # デバッグ情報を出力
+            print(f"  モデルタイプ: {base_model_type}, 学習器タイプ: {learner_type}")
+            
+            cv_results = evaluate_model_cv(
+                X, treatment, outcome, true_ite=df['true_ite'].values if 'true_ite' in df.columns else None,
+                model_type=base_model_type,  # s_learner などのシンプルな形式
+                learner_type=learner_type,
+                propensity_score=p_score,
+                n_splits=args.folds,  # 外部から指定可能なfold数
+                random_state=42,
+                classification_threshold=args.threshold
+            )
+            print(f"\n{model_type}:")
+            
+            # 処置効果の評価指標
+            if 'correlation' in cv_results:
+                print(f"  ====== 処置効果の評価 ======")
+                print(f"  相関係数: {cv_results.get('correlation', 0):.4f} (±{cv_results.get('correlation_std', 0):.4f})")
+                print(f"  MSE: {cv_results.get('mse', 0):.4f} (±{cv_results.get('mse_std', 0):.4f})")
+                print(f"  符号一致率: {cv_results.get('sign_accuracy', 0):.4f} (±{cv_results.get('sign_accuracy_std', 0):.4f})")
+                print(f"  R2: {cv_results.get('r2', 0):.4f} (±{cv_results.get('r2_std', 0):.4f})")
+                if 'auc_roc' in cv_results:
+                    print(f"  AUC-ROC: {cv_results.get('auc_roc', 0):.4f} (±{cv_results.get('auc_roc_std', 0):.4f})")
+            
+            # 処置群の予測評価
+            if 'treated_outcome_mse' in cv_results:
+                avg_treated_size = cv_results.get('avg_treated_size', 0)
+                print(f"\n  ====== 処置群の予測評価 (平均サンプル数: {avg_treated_size:.1f}, {args.folds}分割交差検証平均) ======")
+                print(f"  MSE: {cv_results.get('treated_outcome_mse', 0):.4f} (±{cv_results.get('treated_outcome_mse_std', 0):.4f})")
+                print(f"  R2: {cv_results.get('treated_outcome_r2', 0):.4f} (±{cv_results.get('treated_outcome_r2_std', 0):.4f})")
+                if 'treated_outcome_accuracy' in cv_results:
+                    print(f"  正解率: {cv_results.get('treated_outcome_accuracy', 0):.4f} (±{cv_results.get('treated_outcome_accuracy_std', 0):.4f})")
+                if 'treated_outcome_auc_roc' in cv_results:
+                    print(f"  AUC-ROC: {cv_results.get('treated_outcome_auc_roc', 0):.4f} (±{cv_results.get('treated_outcome_auc_roc_std', 0):.4f})")
+                    print(f"  精度: {cv_results.get('treated_outcome_precision', 0):.4f} (±{cv_results.get('treated_outcome_precision_std', 0):.4f})")
+                    print(f"  再現率: {cv_results.get('treated_outcome_recall', 0):.4f} (±{cv_results.get('treated_outcome_recall_std', 0):.4f})")
+                    print(f"  F1スコア: {cv_results.get('treated_outcome_f1', 0):.4f} (±{cv_results.get('treated_outcome_f1_std', 0):.4f})")
+                
+                if 'treated_outcome_conf_mat' in cv_results:
+                    conf_mat = cv_results.get('treated_outcome_conf_mat')
+                    if conf_mat.size == 4:  # 2x2行列の場合
+                        tn, fp, fn, tp = conf_mat.ravel()
+                        total = tn + fp + fn + tp
+                        print(f"  混同行列 (合計: {total}): [全fold合算]")
+                        print(f"  [[{tn} {fp}]")
+                        print(f"   [{fn} {tp}]]")
+                        print(f"  TN={tn}, FP={fp}, FN={fn}, TP={tp}")
+                    else:
+                        print(f"  混同行列:\n{conf_mat}")
+            
+            # 非処置群の予測評価
+            if 'control_outcome_mse' in cv_results:
+                avg_control_size = cv_results.get('avg_control_size', 0)
+                print(f"\n  ====== 非処置群の予測評価 (平均サンプル数: {avg_control_size:.1f}, {args.folds}分割交差検証平均) ======")
+                print(f"  MSE: {cv_results.get('control_outcome_mse', 0):.4f} (±{cv_results.get('control_outcome_mse_std', 0):.4f})")
+                print(f"  R2: {cv_results.get('control_outcome_r2', 0):.4f} (±{cv_results.get('control_outcome_r2_std', 0):.4f})")
+                if 'control_outcome_accuracy' in cv_results:
+                    print(f"  正解率: {cv_results.get('control_outcome_accuracy', 0):.4f} (±{cv_results.get('control_outcome_accuracy_std', 0):.4f})")
+                if 'control_outcome_auc_roc' in cv_results:
+                    print(f"  AUC-ROC: {cv_results.get('control_outcome_auc_roc', 0):.4f} (±{cv_results.get('control_outcome_auc_roc_std', 0):.4f})")
+                    print(f"  精度: {cv_results.get('control_outcome_precision', 0):.4f} (±{cv_results.get('control_outcome_precision_std', 0):.4f})")
+                    print(f"  再現率: {cv_results.get('control_outcome_recall', 0):.4f} (±{cv_results.get('control_outcome_recall_std', 0):.4f})")
+                    print(f"  F1スコア: {cv_results.get('control_outcome_f1', 0):.4f} (±{cv_results.get('control_outcome_f1_std', 0):.4f})")
+                
+                if 'control_outcome_conf_mat' in cv_results:
+                    conf_mat = cv_results.get('control_outcome_conf_mat')
+                    if conf_mat.size == 4:  # 2x2行列の場合
+                        tn, fp, fn, tp = conf_mat.ravel()
+                        total = tn + fp + fn + tp
+                        print(f"  混同行列 (合計: {total}): [全fold合算]")
+                        print(f"  [[{tn} {fp}]")
+                        print(f"   [{fn} {tp}]]")
+                        print(f"  TN={tn}, FP={fp}, FN={fn}, TP={tp}")
+                    else:
+                        print(f"  混同行列:\n{conf_mat}")
+            
+            # 全体の予測評価
+            if 'overall_outcome_mse' in cv_results:
+                avg_test_size = cv_results.get('avg_test_size', 0)
+                print(f"\n  ====== 全体の予測評価 (平均サンプル数: {avg_test_size:.1f}, {args.folds}分割交差検証平均) ======")
+                print(f"  MSE: {cv_results.get('overall_outcome_mse', 0):.4f} (±{cv_results.get('overall_outcome_mse_std', 0):.4f})")
+                print(f"  R2: {cv_results.get('overall_outcome_r2', 0):.4f} (±{cv_results.get('overall_outcome_r2_std', 0):.4f})")
+                if 'overall_outcome_accuracy' in cv_results:
+                    print(f"  正解率: {cv_results.get('overall_outcome_accuracy', 0):.4f} (±{cv_results.get('overall_outcome_accuracy_std', 0):.4f})")
+                if 'overall_outcome_auc_roc' in cv_results:
+                    print(f"  AUC-ROC: {cv_results.get('overall_outcome_auc_roc', 0):.4f} (±{cv_results.get('overall_outcome_auc_roc_std', 0):.4f})")
+                    print(f"  精度: {cv_results.get('overall_outcome_precision', 0):.4f} (±{cv_results.get('overall_outcome_precision_std', 0):.4f})")
+                    print(f"  再現率: {cv_results.get('overall_outcome_recall', 0):.4f} (±{cv_results.get('overall_outcome_recall_std', 0):.4f})")
+                    print(f"  F1スコア: {cv_results.get('overall_outcome_f1', 0):.4f} (±{cv_results.get('overall_outcome_f1_std', 0):.4f})")
+                
+                if 'overall_outcome_conf_mat' in cv_results:
+                    conf_mat = cv_results.get('overall_outcome_conf_mat')
+                    if conf_mat.size == 4:  # 2x2行列の場合
+                        tn, fp, fn, tp = conf_mat.ravel()
+                        total = tn + fp + fn + tp
+                        print(f"  混同行列 (合計: {total}): [全fold合算]")
+                        print(f"  [[{tn} {fp}]")
+                        print(f"   [{fn} {tp}]]")
+                        print(f"  TN={tn}, FP={fp}, FN={fn}, TP={tp}")
+                    else:
+                        print(f"  混同行列:\n{conf_mat}")
+            
+            # 結果を整形して表示
+            print(f"\n{model_type}:")
+            for metric_name, value in cv_results.items():
+                if isinstance(value, float):
+                    print(f"  {metric_name}: {value:.4f}")
+                else:
+                    print(f"  {metric_name}: {value}")
         
-        # グループ別の正負判定精度
-        if 'response_group' in df.columns:
-            for group in sorted(df['response_group'].unique()):
-                group_df = df[df['response_group'] == group]
-                group_accuracy = (group_df[f'{model_name}_pos'] == group_df['true_uplift_pos']).mean()
-                print(f"  グループ{group}の正負判定精度: {group_accuracy:.4f}")
-    
-    # 7. 実際の処置ポリシーの評価
-    print("\n===== 実際の処置ポリシーの評価 =====")
-    N_treated = df['treatment'].sum()
-    print(f"実際の処置人数: {N_treated}人")
-    
-    # 実際に処置された人たちの真のITE総和
-    actual_policy_effect = df[df['treatment'] == 1]['true_ite'].sum()
-    print(f"実際の処置効果の総和: {actual_policy_effect:.2f}")
-    
-    # 理想的な処置配分（上位N人）の効果
-    oracle_indices = df['true_ite'].nlargest(N_treated).index
-    oracle_effect = df.loc[oracle_indices, 'true_ite'].sum()
-    print(f"理想的な処置配分の効果: {oracle_effect:.2f}")
-    
-    # 処置効率（実際/理想）
-    efficiency = actual_policy_effect / oracle_effect
-    print(f"処置効率（実際/理想）: {efficiency:.2f} ({efficiency*100:.1f}%)")
-    
-    # 8. 各モデルによる処置ポリシーの推定効果
-    print("\n===== 各モデルによる処置ポリシーの推定効果 =====")
-    for model_name in model_names:
-        ite_col = f'ite_{model_name}'
-        model_indices = df[ite_col].nlargest(N_treated).index
-        model_policy_effect = df.loc[model_indices, 'true_ite'].sum()  # 真のITEに基づく効果
-        model_efficiency = model_policy_effect / oracle_effect
-        improvement = model_policy_effect / actual_policy_effect
+        # モデルを学習し、ITE予測
+        print(f"\n===== {model_type}のITE予測 =====")
         
-        print(f"{model_name}:")
-        print(f"  推定処置効果の総和: {model_policy_effect:.2f}")
-        print(f"  処置効率（推定/理想）: {model_efficiency:.2f} ({model_efficiency*100:.1f}%)")
-        print(f"  実際の処置に対する改善率: {improvement:.2f}倍")
-    
-    # 単純なoutcome予測モデルによる処置ポリシーの推定効果
-    print("\n単純なoutcome予測モデルによる処置ポリシーの推定効果:")
-    model_indices = df['predicted_outcome'].nlargest(N_treated).index
-    model_policy_effect = df.loc[model_indices, 'true_ite'].sum()
-    model_efficiency = model_policy_effect / oracle_effect
-    improvement = model_policy_effect / actual_policy_effect
-        
-    print(f"  推定処置効果の総和: {model_policy_effect:.2f}")
-    print(f"  処置効率（推定/理想）: {model_efficiency:.2f} ({model_efficiency*100:.1f}%)")
-    print(f"  実際の処置に対する改善率: {improvement:.2f}倍")
-    
-    # 9. 可視化
-    try:
-        plot_path = 'uplift_curve.png'
-        plot_uplift_curve(
-            df=df,
-            models=model_names,
-            true_ite_col='true_ite',
-            prefix='ite_',
-            outcome_col='predicted_outcome',
-            save_path=plot_path
-        )
-    except Exception as e:
-        print(f"可視化中にエラーが発生しました: {e}")
+        # モデルトレーナーの取得
+        model_trainer = get_model_trainer(model_type)
+        if model_trainer:
+            # モデルタイプの判別
+            learner_type = 'classification' if 'classification' in model_type else 'regression'
+            
+            # モデルのトレーニング
+            print(f"モデル学習開始: {model_type}")
+            print(f"特徴量: {X.columns.tolist()}")
+            print(f"特徴量の形状: {X.shape}")
+            model = model_trainer(X, treatment, outcome, propensity_score=p_score)
+            print(f"モデル学習完了: {model_type}, モデルタイプ: {type(model)}")
 
-    # ===== k-foldクロスバリデーションによるモデル評価 =====
-    if 'true_ite' in df.columns:
-        print("\n===== クロスバリデーションによるモデル評価 =====")
-        cv_results = evaluate_all_models_cv(
-            X, treatment, outcome, 
-            true_ite=df['true_ite'], 
-            propensity_score=p_score,
-            n_splits=5, 
-            random_state=42
-        )
-        print_cv_results(cv_results)
-        
-        # グループ別のクロスバリデーション評価
-        print("\n===== グループ別のクロスバリデーション評価 =====")
-        if 'response_group' in df.columns:
-            groups = df['response_group'].unique()
-            groups.sort()
+            # ITE予測
+            print(f"ITE予測開始: {model_type}")
+            ite_pred = model.predict(X)
+            print(f"ITE予測値の形状: {ite_pred.shape}")
+            print(ite_pred)
+            print(f"ITE予測完了: {model_type}, 予測形状: {ite_pred.shape}")
+
+            # データフレームに結果を保存
+            result_df = df.copy()
+            result_df['ite_pred'] = ite_pred
+            print(result_df)
             
-            for group in groups:
-                print(f"\nグループ{group}の評価:")
-                group_mask = df['response_group'] == group
+            # CSV出力
+            result_file = f'{model_type}_{learner_type}_uplift_predictions.csv'
+            result_df.to_csv(result_file, index=False)
+            print(f"予測結果を保存しました: {result_file}")
+
+            # モデルを学習し、真値ITEを使った評価
+            print(f"\n===== {model_type}の真値ITEを使った評価 =====")
+
+            # 真のITEがある場合、アップリフト評価を実行
+            if 'true_ite' in df.columns:
+                print("真のITEを使った評価を実行します")
+                true_ite = df['true_ite'].values
                 
-                # このグループのデータだけを抽出
-                X_group = X[group_mask]
-                treatment_group = treatment[group_mask]
-                outcome_group = outcome[group_mask]
-                true_ite_group = df['true_ite'][group_mask]
-                p_score_group = p_score[group_mask] if p_score is not None else None
+                # 真のITEに基づく理想的な処置割り当て
+                ideal_treatment = np.where(true_ite > 0, 1, 0)
+                    
+                # 理想的な処置効果の合計を計算
+                ideal_effect_mask = (ideal_treatment == 1)
+                ideal_effect_sum = np.sum(true_ite[ideal_effect_mask])
                 
-                # サンプル数が少なすぎる場合はスキップ
-                if len(X_group) < 100:
-                    print(f"  サンプル数 ({len(X_group)}) が少なすぎるため評価をスキップします")
-                    continue
+                # ITEの予測値でソート（降順）
+                sorted_indices = np.argsort(-ite_pred.flatten())
                 
-                # このグループだけでクロスバリデーション評価（サンプル数に応じてsplitsを調整）
-                n_splits = min(5, len(X_group) // 20)  # 各分割に最低20サンプルは欲しい
+                # 実際の処置による効果の合計を計算
+                treatment_array = np.array(treatment)
+                actual_effect_mask = (treatment_array == 1)
+                actual_effect_sum = np.sum(true_ite[actual_effect_mask])
                 
-                cv_results_group = evaluate_all_models_cv(
-                    X_group, treatment_group, outcome_group,
-                    true_ite=true_ite_group, 
-                    propensity_score=p_score_group,
-                    n_splits=n_splits, 
-                    random_state=42
-                )
-                print_cv_results(cv_results_group)
+                # 実際に処置した人数を計算
+                actual_treatment_count = np.sum(treatment_array)
+                
+                # 実際の処置人数での評価を追加
+                top_actual_count_indices = sorted_indices[:actual_treatment_count]
+                top_actual_count_effect_sum = np.sum(true_ite[top_actual_count_indices])
+                top_actual_count_efficiency = top_actual_count_effect_sum / ideal_effect_sum if ideal_effect_sum > 0 else 0
+                top_actual_count_improvement = top_actual_count_effect_sum / actual_effect_sum if actual_effect_sum > 0 else 0
+                
+                print(f"実際に処置した人数: {actual_treatment_count}")
+                print("  N\t効果総和\t効率\t改善率\t備考")
+                print(f"  {actual_treatment_count}\t{top_actual_count_effect_sum:.2f}\t{top_actual_count_efficiency:.2f} ({top_actual_count_efficiency*100:.1f}%)\t{top_actual_count_improvement:.2f}倍\t実際の処置人数")
+                
+                # 上位N人による評価（実際の処置数を含む）
+                print("\n上位N人に処置した場合の効果:")
+                print("  N\t効果総和\t効率\t改善率\t備考")
+                # その他の1000刻みの評価も表示
+                for n in range(1000, 10001, 1000):
+                    # 上位n人を処置対象として選択
+                    top_n_indices = sorted_indices[:n]
+                    top_n_effect_sum = np.sum(true_ite[top_n_indices])
+                    
+                    # 効率とROI計算
+                    top_n_efficiency = top_n_effect_sum / ideal_effect_sum if ideal_effect_sum > 0 else 0
+                    top_n_improvement = top_n_effect_sum / actual_effect_sum if actual_effect_sum > 0 else 0
+                    
+                    # 実際の処置人数と同じ場合は注釈を追加
+                    note = "実際の処置人数" if n == actual_treatment_count else ""
+                    
+                    print(f"  {n}\t{top_n_effect_sum:.2f}\t{top_n_efficiency:.2f} ({top_n_efficiency*100:.1f}%)\t{top_n_improvement:.2f}倍\t{note}")
+        else:
+            print(f"エラー: モデル{model_type}の学習関数がありません")
+    
+    else:
+        # 引数指定がない場合は、以前のコードで全モデルを比較
+        print("\n===== 分類器と回帰器の両方を使ったモデル比較 =====")
+        # ここに従来の全モデル比較コードが続く
+
+    print(f"\n===== {args.model}モデルの評価完了 =====")
 
 if __name__ == "__main__":
     main()
