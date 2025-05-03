@@ -52,20 +52,6 @@ def train_s_learner(X, treatment, outcome, model_type='classification', propensi
 
     return model
     
-#    # 予測（傾向スコアがあれば使用）- 必ずDataFrameで渡す
-#    if propensity_score is not None:
-#        if test_data is None:
-#            predictions = model.predict(X=X_df, p=propensity_score)
-#        else:
-#            predictions = model.predict(X=ensure_dataframe(test_data), p=propensity_score)
-#    else:
-#        if test_data is None:
-#            predictions = model.predict(X=X_df)
-#        else:
-#            predictions = model.predict(X=ensure_dataframe(test_data))
-#    
-#    return model, predictions
-
 def train_t_learner(X, treatment, outcome, model_type='classification', test_data=None):
     """T-Learnerモデルの学習と予測"""
     if model_type == 'classification':
@@ -81,14 +67,6 @@ def train_t_learner(X, treatment, outcome, model_type='classification', test_dat
 
     return model
     
-#    # 予測 - 必ずDataFrameで渡す
-#    if test_data is None:
-#        predictions = model.predict(X=X_df)
-#    else:
-#        predictions = model.predict(X=ensure_dataframe(test_data))
-#    
-#    return model, predictions
-
 def train_x_learner(X, treatment, outcome, propensity_score=None, test_data=None):
     """X-Learnerモデルの学習と予測"""
     model = BaseXRegressor(learner=lgb.LGBMRegressor(**get_model_params('regression')))
@@ -101,20 +79,6 @@ def train_x_learner(X, treatment, outcome, propensity_score=None, test_data=None
 
     return model
     
-#    # 予測（傾向スコアがあれば使用）- 必ずDataFrameで渡す
-#    if propensity_score is not None:
-#        if test_data is None:
-#            predictions = model.predict(X=X_df, p=propensity_score)
-#        else:
-#            predictions = model.predict(X=ensure_dataframe(test_data), p=propensity_score)
-#    else:
-#        if test_data is None:
-#            predictions = model.predict(X=X_df)
-#        else:
-#            predictions = model.predict(X=ensure_dataframe(test_data))
-#    
-#    return model, predictions
-
 def train_r_learner(X, treatment, outcome, test_data=None):
     """R-Learnerモデルの学習と予測"""
     model = BaseRRegressor(learner=lgb.LGBMRegressor(**get_model_params('regression')))
@@ -126,14 +90,6 @@ def train_r_learner(X, treatment, outcome, test_data=None):
     model.fit(X=X_df, treatment=treatment, y=outcome)
 
     return model
-    
-#    # 予測 - 必ずDataFrameで渡す
-#    if test_data is None:
-#        predictions = model.predict(X=X_df)
-#    else:
-#        predictions = model.predict(X=ensure_dataframe(test_data))
-#    
-#    return model, predictions
 
 def train_dr_learner(X, treatment, outcome, propensity_score=None, test_data=None):
     """DR-Learner (Doubly Robust) モデルの学習と予測"""
@@ -151,14 +107,6 @@ def train_dr_learner(X, treatment, outcome, propensity_score=None, test_data=Non
 
     return model
     
-#    # 予測 - 必ずDataFrameで渡す
-#    if test_data is None:
-#        predictions = model.predict(X=X_df)
-#    else:
-#        predictions = model.predict(X=ensure_dataframe(test_data))
-#    
-#    return model, predictions
-
 def train_all_models(X, treatment, outcome, propensity_score):
     """すべてのモデルを学習し、予測を返す"""
     model_results = {}
