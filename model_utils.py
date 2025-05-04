@@ -52,15 +52,15 @@ def _binarize_predictions(y_pred, threshold=0.5):
     """
     return (y_pred > threshold).astype(int)
 
-def get_model_trainer(model_type, learner_type='classification'):
+def get_model_trainer(uplift_method, prediction_method):
     """
     モデル名に対応するトレーナー関数を返す
     
     Parameters:
     ----------
-    model_type : str
+    uplift_method : str
         モデルタイプ ('s_learner', 't_learner', 'x_learner', 'r_learner', 'dr_learner')
-    learner_type : str, default='classification'
+    prediction_method : str, default='classification'
         学習器タイプ ('classification', 'regression')
         
     Returns:
@@ -69,72 +69,74 @@ def get_model_trainer(model_type, learner_type='classification'):
         対応するモデルトレーナー関数
     """
     # 複合名を正しく処理する
-    valid_model_types = ['s_learner', 't_learner', 'x_learner', 'r_learner', 'dr_learner']
+    valid_uplift_methods = ['s_learner', 't_learner', 'x_learner', 'r_learner', 'dr_learner']
+    valid_prediction_methods = ['classification', 'regression']
+
     
-    # '_'が含まれていて、かつvalid_model_typesに含まれない場合は、旧形式の命名規則と見なす
-    if '_' in model_type and model_type not in valid_model_types:
-        parts = model_type.rsplit('_', 1)
-        if len(parts) == 2:
-            model_type, learner_type = parts
+    ## '_'が含まれていて、かつvalid_model_typesに含まれない場合は、旧形式の命名規則と見なす
+    #if '_' in model_type and model_type not in valid_model_types:
+    #    parts = model_type.rsplit('_', 1)
+    #    if len(parts) == 2:
+    #        model_type, learner_type = parts
     
-    # learner_typeを固定値として使用
-    learner_type_fixed = learner_type
+    ## learner_typeを固定値として使用
+    #learner_type_fixed = learner_type
     
-    print(f"[DEBUG] get_model_trainer: model_type={model_type}, learner_type={learner_type_fixed}")
+    print(f"[DEBUG] get_model_trainer: uplift_method={uplift_method}, prediction_method={prediction_method}")
     
     # s_learnerと't_learner'は分類器と回帰器の両方をサポート
-    if model_type == 's_learner':
+    if uplift_method == 's_learner':
         from causal_models import train_s_learner
         def s_learner_wrapper(X, treatment, outcome, propensity_score=None):
-            print(f"[DEBUG] s_learner_wrapper: X.shape={X.shape}, learner_type={learner_type_fixed}")
+            print(f"[DEBUG] s_learner_wrapper: X.shape={X.shape}, prediction_method={prediction_method}")
             # 学習器タイプは外部から固定値として渡される
             model = train_s_learner(
-                X, treatment, outcome, model_type=learner_type_fixed, propensity_score=propensity_score
+                X, treatment, outcome, prediction_method, propensity_score=propensity_score
             )
             print(f"[DEBUG] s_learner_wrapper: モデルタイプ={type(model)}")
             return model
         return s_learner_wrapper
     
     # T-Learner
-    elif model_type == 't_learner':
+    elif uplift_method == 't_learner':
         from causal_models import train_t_learner
         def t_learner_wrapper(X, treatment, outcome, propensity_score=None):
             model = train_t_learner(
-                X, treatment, outcome, model_type=learner_type_fixed
+                X, treatment, outcome, prediction_method
             )
             return model
         return t_learner_wrapper
     
     # X-Learner（常に回帰）
-    elif model_type == 'x_learner':
+    elif uplift_method == 'x_learner':
         from causal_models import train_x_learner
         def x_learner_wrapper(X, treatment, outcome, propensity_score=None):
             model = train_x_learner(
-                X, treatment, outcome, propensity_score=propensity_score
+                X, treatment, outcome, prediction_method, propensity_score=propensity_score
             )
             return model
         return x_learner_wrapper
     
     # R-Learner（常に回帰）
-    elif model_type == 'r_learner':
+    elif uplift_method == 'r_learner':
         from causal_models import train_r_learner
         def r_learner_wrapper(X, treatment, outcome, propensity_score=None):
             model = train_r_learner(
-                X, treatment, outcome
+                X, treatment, outcome, prediction_method
             )
             return model
         return r_learner_wrapper
     
     # DR-Learner（常に回帰） 
-    elif model_type == 'dr_learner':
+    elif uplift_method == 'dr_learner':
         from causal_models import train_dr_learner
         def dr_learner_wrapper(X, treatment, outcome, propensity_score=None):
             model = train_dr_learner(
-                X, treatment, outcome, propensity_score=propensity_score
+                X, treatment, outcome, prediction_method, propensity_score=propensity_score
             )
             return model
         return dr_learner_wrapper
     
     else:
-        print(f"警告: 未知のモデルタイプ '{model_type}'")
+        print(f"警告: 未知のuplift_method '{uplift_method}'")
         return None

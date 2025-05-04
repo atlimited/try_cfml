@@ -12,12 +12,191 @@ from sklearn.metrics import (
 from sklearn.exceptions import UndefinedMetricWarning
 import warnings
 from scipy.stats import pearsonr
+from scipy import stats
 from tqdm import tqdm
 
 # ローカルモジュールのインポート
 import causal_models
 from outcome_predictors import get_outcome_predictor, fallback_predict_outcomes
 from model_utils import get_model_trainer, ensure_dataframe, _binarize_predictions
+
+def calculate_top_n_ate(ite_pred, treatment, outcome, ns=[500, 1000, 2000], true_ite=None, alpha=0.05):
+    """
+    ITE予測値の上位N人に対する実際の処置効果（ATE）を計算する
+    
+    Parameters:
+    -----------
+    ite_pred : array-like
+        個別処置効果の予測値
+    treatment : array-like
+        処置フラグ（1=処置、0=非処置）
+    outcome : array-like
+        結果変数
+    ns : list of int, default=[500, 1000, 2000]
+        上位何人を選ぶかのリスト
+    true_ite : array-like, optional
+        真のITE値（オラクル情報）
+    alpha : float, default=0.05
+        信頼区間の有意水準
+        
+    Returns:
+    --------
+    dict
+        各N値に対する計算結果を含む辞書
+    """
+    results = {}
+    
+    # NumPy配列に変換
+    ite_pred_array = np.array(ite_pred).flatten()  # 2次元配列の場合は1次元に変換
+    treatment_array = np.array(treatment)
+    outcome_array = np.array(outcome)
+    
+    # 全体の処置群と非処置群の平均アウトカムを計算（ベースライン比較用）
+    all_treated_indices = np.where(treatment_array == 1)[0]
+    all_control_indices = np.where(treatment_array == 0)[0]
+    
+    all_treated_outcome = outcome_array[treatment_array == 1]
+    all_control_outcome = outcome_array[treatment_array == 0]
+    
+    all_treated_mean = np.mean(all_treated_outcome) if len(all_treated_outcome) > 0 else np.nan
+    all_control_mean = np.mean(all_control_outcome) if len(all_control_outcome) > 0 else np.nan
+    all_ate = all_treated_mean - all_control_mean if not (np.isnan(all_treated_mean) or np.isnan(all_control_mean)) else np.nan
+    
+    # 元の処置戦略の効果を計算
+    original_treatment_count = np.sum(treatment_array == 1)
+    original_treatment_effect = all_ate * original_treatment_count if not np.isnan(all_ate) else np.nan
+    
+    # 元の処置戦略で処置された人々の真のITE合計（オラクル情報がある場合）
+    if true_ite is not None:
+        true_ite_array = np.array(true_ite)
+        original_true_effect = np.sum(true_ite_array[all_treated_indices])
+    else:
+        original_true_effect = np.nan
+    
+    for n in ns:
+        # 上位N人のインデックスを取得
+        top_n_indices = np.argsort(ite_pred_array)[-n:]
+        
+        # 上位N人のデータを抽出
+        top_n_treatment = treatment_array[top_n_indices]
+        top_n_outcome = outcome_array[top_n_indices]
+        
+        # 処置群と非処置群に分ける
+        treated_mask = top_n_treatment == 1
+        control_mask = top_n_treatment == 0
+        
+        treated_outcome = top_n_outcome[treated_mask]
+        control_outcome = top_n_outcome[control_mask]
+        
+        # 処置群と非処置群のサイズを確認
+        n_treated = len(treated_outcome)
+        n_control = len(control_outcome)
+        
+        # 結果を格納する辞書を初期化
+        result = {
+            'n': n,
+            'n_treated': n_treated,
+            'n_control': n_control,
+            'original_treatment_count': original_treatment_count,
+            'original_treatment_effect': original_treatment_effect,
+            'original_true_effect': original_true_effect
+        }
+        
+        # 上位N人の処置群と非処置群の平均を計算
+        if n_treated > 0 and n_control > 0:
+            # 上位N人の中での処置効果計算
+            top_n_treated_mean = np.mean(treated_outcome)
+            top_n_control_mean = np.mean(control_outcome)
+            top_n_effect = top_n_treated_mean - top_n_control_mean
+            
+            # 仮想的な総効果 = 処置効果 × 非処置群の人数
+            virtual_total_effect = top_n_effect * n_control
+            
+            # 元の処置戦略との比較（同数の処置を行った場合）
+            if n <= original_treatment_count:
+                # 上位n人に処置した場合の効果
+                top_n_virtual_effect = top_n_effect * n
+                
+                # 改善率
+                if not np.isnan(original_treatment_effect) and original_treatment_effect != 0:
+                    improvement_ratio = top_n_virtual_effect / (original_treatment_effect * n / original_treatment_count)
+                else:
+                    improvement_ratio = np.nan
+            else:
+                # 元の処置人数より多い場合は、元の処置人数分だけで比較
+                top_n_virtual_effect = top_n_effect * original_treatment_count
+                
+                # 改善率
+                if not np.isnan(original_treatment_effect) and original_treatment_effect != 0:
+                    improvement_ratio = top_n_virtual_effect / original_treatment_effect
+                else:
+                    improvement_ratio = np.nan
+            
+            result.update({
+                'top_n_treated_mean': top_n_treated_mean,
+                'top_n_control_mean': top_n_control_mean,
+                'top_n_effect': top_n_effect,
+                'virtual_total_effect': virtual_total_effect,
+                'top_n_virtual_effect': top_n_virtual_effect,
+                'improvement_ratio': improvement_ratio,
+                'method': 'observed'
+            })
+        else:
+            # 処置群または非処置群のサンプルがない場合
+            result.update({
+                'top_n_treated_mean': np.nan if n_treated == 0 else np.mean(treated_outcome),
+                'top_n_control_mean': np.nan if n_control == 0 else np.mean(control_outcome),
+                'top_n_effect': np.nan,
+                'virtual_total_effect': np.nan,
+                'top_n_virtual_effect': np.nan,
+                'improvement_ratio': np.nan,
+                'method': 'insufficient_data'
+            })
+        
+        # 真のITEがある場合は、それとの比較も行う
+        if true_ite is not None:
+            # 上位N人の真のITE平均
+            top_n_true_ite = true_ite_array[top_n_indices]
+            true_ite_mean = np.mean(top_n_true_ite)
+            
+            # 真のITE > 0の割合
+            positive_ite_ratio = np.mean(top_n_true_ite > 0)
+            
+            # 真のITEに基づく総効果
+            true_total_effect = np.sum(top_n_true_ite)
+            
+            # 元の処置戦略との真の効果比較（同数の処置を行った場合）
+            if n <= original_treatment_count:
+                # 上位n人に処置した場合の真の効果
+                true_n_effect = np.sum(top_n_true_ite)
+                
+                # 真の改善率
+                if original_true_effect != 0:
+                    true_improvement_ratio = true_n_effect / (original_true_effect * n / original_treatment_count)
+                else:
+                    true_improvement_ratio = np.nan
+            else:
+                # 元の処置人数より多い場合は、元の処置人数分だけで比較
+                top_original_count_indices = np.argsort(true_ite_array)[-original_treatment_count:]
+                true_n_effect = np.sum(true_ite_array[top_original_count_indices])
+                
+                # 真の改善率
+                if original_true_effect != 0:
+                    true_improvement_ratio = true_n_effect / original_true_effect
+                else:
+                    true_improvement_ratio = np.nan
+            
+            result.update({
+                'true_ite_mean': true_ite_mean,
+                'positive_ite_ratio': positive_ite_ratio,
+                'true_total_effect': true_total_effect,
+                'true_n_effect': true_n_effect,
+                'true_improvement_ratio': true_improvement_ratio
+            })
+        
+        results[n] = result
+    
+    return results
 
 def evaluate_cv_with_top_n(model_trainer, X, outcome, treatment, fold_count=5, random_state=42, propensity_score=None):
     """CVを使って予測ITEの上位N人評価を行う関数"""
@@ -27,9 +206,11 @@ def evaluate_cv_with_top_n(model_trainer, X, outcome, treatment, fold_count=5, r
     treatment_array = np.array(treatment)
     outcome_array = np.array(outcome)
     converted_mask = (treatment_array == 1) & (outcome_array == 1)
+    treatment_count = np.sum(treatment_array==1)
     converted_count = np.sum(converted_mask)
     
-    print(f"実際にtreatment=1かつoutcome=1だった人数: {converted_count}")
+    print(f"実際にtreatment=1だった人数(全数): {treatment_count}")
+    print(f"実際にtreatment=1かつoutcome=1だった人数(全数): {converted_count}")
     
     # 結果を保存する配列
     cv_predictions = []
@@ -50,22 +231,31 @@ def evaluate_cv_with_top_n(model_trainer, X, outcome, treatment, fold_count=5, r
         
         # テストデータでITE予測
         ite_preds = fold_model.predict(X_test)
+        #print(f"ITE予測値の形状: {ite_preds.shape}")
+        #print("ITE予測値:", ite_preds)
         
         # フォールドごとに評価
-        # 予測ITEの上位converted_count人を選択
+        # 予測ITEの上位(treatment_count / fold_count) (treatment全数のFold相当の人数)を選択
         sorted_indices = np.argsort(-ite_preds.flatten())
-        top_n_indices = sorted_indices[:converted_count]
+        fold_top_n_treatment_count = int(treatment_count/fold_count)
+        top_n_indices = sorted_indices[:fold_top_n_treatment_count]
         
         # そのフォールドでのtreatment=1かつoutcome=1の人数
         fold_converted_mask = (w_test.values == 1) & (y_test.values == 1)
         fold_converted_count = np.sum(fold_converted_mask)
+        print("fold_converted_count:", fold_converted_count)
         
         # 評価指標を計算
-        precision = np.sum(y_test.values[top_n_indices] * w_test.values[top_n_indices]) / converted_count if converted_count > 0 else 0
+        #precision = np.sum(y_test.values[top_n_indices] * w_test.values[top_n_indices]) / treatment_count if treatment_count > 0 else 0
+        #recall = np.sum(y_test.values[top_n_indices] * w_test.values[top_n_indices]) / fold_converted_count if fold_converted_count > 0 else 0
+
+        precision = np.sum(y_test.values[top_n_indices]) / fold_top_n_treatment_count if fold_top_n_treatment_count > 0 else 0
+        recall = np.sum(y_test.values[top_n_indices]) / fold_converted_count if fold_converted_count > 0 else 0
         
         # 結果を保存
         cv_scores.append({
             'precision': precision,
+            'recall': recall,
             'fold_converted_count': fold_converted_count,
             'top_n_converted': np.sum(y_test.values[top_n_indices] * w_test.values[top_n_indices])
         })
@@ -77,13 +267,15 @@ def evaluate_cv_with_top_n(model_trainer, X, outcome, treatment, fold_count=5, r
     
     # 結果を出力
     print("\nCV評価 - 予測ITE上位N人での効果:")
-    print(f"  N = {converted_count} (treatment=1かつoutcome=1の人数)")
+    print(f"  N = {int(treatment_count/fold_count)} (treatment=1かつoutcome=1の人数)")
     
     avg_precision = np.mean([s['precision'] for s in cv_scores])
+    avg_recall = np.mean([s['recall'] for s in cv_scores])
     print(f"  平均精度（precision）: {avg_precision:.4f}")
+    print(f"  平均再現率（recall）: {avg_recall:.4f}")
     
     for i, score in enumerate(cv_scores):
-        print(f"  Fold {i+1}: 上位{converted_count}人中 {score['top_n_converted']}人が実際にコンバージョン (精度: {score['precision']:.4f})")
+        print(f"  Fold {i+1}: 上位{int(treatment_count/fold_count)}人中 {score['top_n_converted']}人が実際にコンバージョン (精度: {score['precision']:.4f}, 再現率: {score['recall']:.4f})")
     
     return {
         'cv_predictions': cv_predictions,

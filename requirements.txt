@@ -5,16 +5,25 @@
 
 # 科学計算ライブラリ
 numpy==1.26.0
+#numpy==1.24.4
 
 # 表データ解析ライブラリ
-pandas==2.2.3
+#pandas==2.2.3
+pandas==1.5.3
 
 # 機械学習ライブラリ
 scikit-learn==1.6.1
 
 # 可視化ライブラリ
 matplotlib==3.10.1
+#matplotlib==3.9.4
 seaborn==0.13.2
 
 # 統計ライブラリ
 statsmodels==0.14.4
+
+# CausalML
+causalml==0.15.3
+
+# Open Bandit Platform
+obp==0.4.1

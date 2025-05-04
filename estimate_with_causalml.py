@@ -23,7 +23,8 @@ from model_evaluation import (
     print_cv_results,
     run_cv_with_statistics,
     evaluate_model_cv,
-    evaluate_cv_with_top_n
+    evaluate_cv_with_top_n,
+    calculate_top_n_ate
 )
 from causal_evaluation import (
     compute_propensity_scores,
@@ -129,37 +130,22 @@ def main():
                       help='交差検証のfold数（デフォルト: 2）')
     args = parser.parse_args()
     
-    # モデル名の決定（新方式と旧方式の両方をサポート）
-    #if args.model is not None:
-    #    model_name = args.model
-    #    # model引数が指定された場合
-    #    if args.model.endswith('_classification') or args.model.endswith('_regression'):
-    #        # すでに完全な形式（例：'s_learner_classification'）
-    #        model_type = args.model
-    #        base_model_type, learner_type = args.model.rsplit('_', 1)
-    #    else:
-    #        # モデル名のみ指定された場合（例：'s_learner'）
-    #        base_model_type = args.model
-    #        learner_type = args.learner_type if args.learner_type else 'classification'
-    #        model_type = f"{base_model_type}_{learner_type}"
-    #elif args.model_type is not None:
-    #    # モデルタイプが指定された場合
-    #    base_model_type = args.model_type
-    #    learner_type = args.learner_type if args.learner_type else 'classification'
-    #    model_type = f"{base_model_type}_{learner_type}"
-    #else:
-    #    # デフォルト値
-    #    base_model_type = "s_learner"
-    #    learner_type = "classification"
-    #    model_type = f"{base_model_type}_{learner_type}"
-
     if args.causal_model_name is not None:
         causal_model_name = args.causal_model_name
-        uplift_method, prediction_method = causal_model_name.split("_")
+        # s_learner_classificationのように複数の_がある場合に対応
+        parts = causal_model_name.split("_")
+        if len(parts) >= 2:
+            uplift_method = parts[0]
+            prediction_method = "_".join(parts[1:])
+        else:
+            print("無効なモデル名です。'uplift_method_prediction_method'の形式で指定してください。")
+            exit()
     elif args.uplift_method is not None and args.prediction_method is not None:
-        causal_model_name = f"{args.uplift_method}_{args.prediction_method}"j
+        uplift_method = args.uplift_method
+        prediction_method = args.prediction_method
+        causal_model_name = f"{uplift_method}_{prediction_method}"
     else:
-        print("invalid model name")
+        print("モデル名が指定されていません。--causal_model_name または --uplift_method と --prediction_method を指定してください。")
         exit()
     
     print(f"\n===== {causal_model_name}モデルの評価を開始 =====")
@@ -213,127 +199,124 @@ def main():
     
     # ここから、指定したモデルだけを評価するように変更
     # 分類器と回帰器のモデル比較部分は、指定したモデルのみ実行
-    if args.model or (args.model_type and args.learner_type):
+    #if args.causal_model_name:
         # モデルトレーナーの取得
-        model_trainer = get_model_trainer(causal_model_name)
+    model_trainer = get_model_trainer(uplift_method, prediction_method)
 
-        if model_trainer:
-            # モデルタイプの判別
-            #learner_type = 'classification' if 'classification' in model_name else 'regression'
+    if model_trainer:
+        # モデルタイプの判別
 
-            if args.cv:
-                print(f"\n===== {causal_model_name}のクロスバリデーション評価 =====")
-                cv_top_n_results = evaluate_cv_with_top_n(model_trainer, X, outcome, treatment, fold_count=5)
-                #print(cv_top_n_results)
-            
-            # モデルを学習し、ITE予測
-            print(f"\n===== {causal_model_name}のITE予測 =====")
+        if args.cv:
+            print(f"\n===== {causal_model_name}のクロスバリデーション評価 =====")
+            cv_top_n_results = evaluate_cv_with_top_n(model_trainer, X, outcome, treatment, fold_count=5)
+            #print(cv_top_n_results)
+        
+        # モデルを学習し、ITE予測
+        print(f"\n===== {causal_model_name}のITE予測 =====")
 
-            # モデルのトレーニング
-            print(f"モデル学習開始: {causal_model_name}")
-            print(f"特徴量: {X.columns.tolist()}")
-            print(f"特徴量の形状: {X.shape}")
-            model = model_trainer(X, treatment, outcome, propensity_score=p_score)
-            print(f"モデル学習完了: {model}, モデルタイプ: {type(model)}")
+        # モデルのトレーニング
+        print(f"モデル学習開始: {causal_model_name}")
+        print(f"特徴量: {X.columns.tolist()}")
+        print(f"特徴量の形状: {X.shape}")
+        model = model_trainer(X, treatment, outcome, propensity_score=p_score)
+        print(f"モデル学習完了: {model}, モデルタイプ: {type(model)}")
 
-            # ITE予測
-            print(f"ITE予測開始: {causal_model_name}")
-            ite_pred = model.predict(X)
-            print(f"ITE予測値の形状: {ite_pred.shape}")
-            print(ite_pred)
-            print(f"ITE予測完了: {causal_model_name}, 予測形状: {ite_pred.shape}")
+        # ITE予測
+        print(f"ITE予測開始: {causal_model_name}")
+        ite_pred = model.predict(X)
+        print(f"ITE予測値の形状: {ite_pred.shape}")
+        print(ite_pred)
+        print(f"ITE予測完了: {causal_model_name}, 予測形状: {ite_pred.shape}")
 
-            # データフレームに結果を保存
-            result_df = df.copy()
-            result_df['ite_pred'] = ite_pred
-            print(result_df)
-            
-            # CSV出力
-            result_file = f'{causal_model_name}_uplift_predictions.csv'
-            result_df.to_csv(result_file, index=False)
-            print(f"予測結果を保存しました: {result_file}")
+        # データフレームに結果を保存
+        result_df = df.copy()
+        result_df['ite_pred'] = ite_pred
+        print(result_df)
+        
+        # CSV出力
+        result_file = f'{causal_model_name}_uplift_predictions.csv'
+        result_df.to_csv(result_file, index=False)
+        print(f"予測結果を保存しました: {result_file}")
 
-            # DoublyRobust評価
-            from obp.dataset import OpenBanditDataset
-            from obp.policy import RandomPolicy
-            from obp.ope import DoublyRobust as DRLearner
-            
-            X, A, R, p_b = (
-                df[['age', 'homeownership']].values,
-                df['treatment'].values,
-                df['outcome'].values,
-                p_score  # または適切な傾向スコア（propensity_score）
-            )
-            
-            policy = RandomPolicy(n_actions=2, random_state=42)
-            p_e = policy.probability(X)
-            
-            dr = DRLearner()  
-            V_dr = dr.estimate_policy_value(reward=R, action=A, pscore=p_b, evaluation_policy_pscore=p_e)
-            print("DR-OPE 推定ポリシー価値:", V_dr)
-
-
-            # モデルを学習し、真値ITEを使った評価
-            print(f"\n===== {model_type}の真値ITEを使った評価 =====")
-
-            # 真のITEがある場合、アップリフト評価を実行
-            if 'true_ite' in df.columns:
-                print("真のITEを使った評価を実行します")
-                true_ite = df['true_ite'].values
-                
-                # 真のITEに基づく理想的な処置割り当て
-                ideal_treatment = np.where(true_ite > 0, 1, 0)
-                    
-                # 理想的な処置効果の合計を計算
-                ideal_effect_mask = (ideal_treatment == 1)
-                ideal_effect_sum = np.sum(true_ite[ideal_effect_mask])
-                
-                # ITEの予測値でソート（降順）
-                sorted_indices = np.argsort(-ite_pred.flatten())
-                
-                # 実際の処置による効果の合計を計算
-                treatment_array = np.array(treatment)
-                actual_effect_mask = (treatment_array == 1)
-                actual_effect_sum = np.sum(true_ite[actual_effect_mask])
-                
-                # 実際に処置した人数を計算
-                actual_treatment_count = np.sum(treatment_array)
-                
-                # 実際の処置人数での評価を追加
-                top_actual_count_indices = sorted_indices[:actual_treatment_count]
-                top_actual_count_effect_sum = np.sum(true_ite[top_actual_count_indices])
-                top_actual_count_efficiency = top_actual_count_effect_sum / ideal_effect_sum if ideal_effect_sum > 0 else 0
-                top_actual_count_improvement = top_actual_count_effect_sum / actual_effect_sum if actual_effect_sum > 0 else 0
-                
-                print(f"実際に処置した人数: {actual_treatment_count}")
-                print("  N\t効果総和\t効率\t改善率\t備考")
-                print(f"  {actual_treatment_count}\t{top_actual_count_effect_sum:.2f}\t{top_actual_count_efficiency:.2f} ({top_actual_count_efficiency*100:.1f}%)\t{top_actual_count_improvement:.2f}倍\t実際の処置人数")
-                
-                # 上位N人による評価（実際の処置数を含む）
-                print("\n上位N人に処置した場合の効果:")
-                print("  N\t効果総和\t効率\t改善率\t備考")
-                # その他の1000刻みの評価も表示
-                for n in range(1000, 10001, 1000):
-                    # 上位n人を処置対象として選択
-                    top_n_indices = sorted_indices[:n]
-                    top_n_effect_sum = np.sum(true_ite[top_n_indices])
-                    
-                    # 効率とROI計算
-                    top_n_efficiency = top_n_effect_sum / ideal_effect_sum if ideal_effect_sum > 0 else 0
-                    top_n_improvement = top_n_effect_sum / actual_effect_sum if actual_effect_sum > 0 else 0
-                    
-                    # 実際の処置人数と同じ場合は注釈を追加
-                    note = "実際の処置人数" if n == actual_treatment_count else ""
-                    
-                    print(f"  {n}\t{top_n_effect_sum:.2f}\t{top_n_efficiency:.2f} ({top_n_efficiency*100:.1f}%)\t{top_n_improvement:.2f}倍\t{note}")
-
+        # 予測上位N人のATE計算
+        print("\n===== 予測上位N人のATE =====")
+        from model_evaluation import calculate_top_n_ate
+        
+        # 計算するN値のリスト
+        ns = [500, 1000, 2000]
+        
+        if 'true_ite' in df.columns:
+            true_ite = df['true_ite'].values
+            top_n_results = calculate_top_n_ate(ite_pred, treatment, outcome, ns=ns, true_ite=true_ite)
         else:
-            print(f"エラー: モデル{causal_model_name}の学習関数がありません")
-    
+            top_n_results = calculate_top_n_ate(ite_pred, treatment, outcome, ns=ns)
+
+        # 結果の表示
+        for n, result in top_n_results.items():
+            print(f"\n上位{n}人の結果:")
+            print(f"  処置群サイズ: {result['n_treated']}")
+            print(f"  非処置群サイズ: {result['n_control']}")
+            
+            if result.get('method') == 'observed':
+                # 通常の計算結果がある場合
+                print(f"  上位{n}人の処置群平均: {result['top_n_treated_mean']:.4f}")
+                print(f"  上位{n}人の非処置群平均: {result['top_n_control_mean']:.4f}")
+                print(f"  上位{n}人の処置効果: {result['top_n_effect']:.4f}")
+                
+                # 元の処置戦略との比較
+                original_count = result['original_treatment_count']
+                print(f"\n  元の処置戦略との比較（処置数: {original_count}人）:")
+                print(f"  同数処置時の効果比較:")
+                print(f"    上位{n}人処置の効果: {result['top_n_virtual_effect']:.4f}")
+                print(f"    元の処置戦略の効果: {result['original_treatment_effect'] * n / original_count if n <= original_count else result['original_treatment_effect']:.4f}")
+                print(f"    改善率: {result['improvement_ratio']:.2f}倍")
+            else:
+                # 処置群または非処置群のサンプルが不足している場合
+                print(f"  注意: 上位{n}人の中に処置群と非処置群の両方が十分にありません")
+            
+            # 真のITEがある場合
+            if 'true_ite_mean' in result:
+                print(f"\n  真のITE情報:")
+                print(f"    真のITE平均: {result['true_ite_mean']:.4f}")
+                print(f"    正のITE割合: {result['positive_ite_ratio']*100:.1f}%")
+                print(f"    真のITEに基づく総効果: {result['true_total_effect']:.4f}")
+                
+                # 真の改善率
+                print(f"\n  真の効果での比較:")
+                print(f"    上位{n}人処置の真の効果: {result['true_n_effect']:.4f}")
+                print(f"    元の処置戦略の真の効果: {result['original_true_effect']:.4f}")
+                print(f"    真の改善率: {result['true_improvement_ratio']:.2f}倍")
+            
+            # 実際の処置人数での評価を追加
+            top_actual_count_indices = np.argsort(-ite_pred.flatten())[:result['n_treated']]
+            top_actual_count_effect_sum = np.sum(true_ite[top_actual_count_indices])
+            top_actual_count_efficiency = top_actual_count_effect_sum / result['true_total_effect'] if result['true_total_effect'] > 0 else 0
+            top_actual_count_improvement = top_actual_count_effect_sum / result['true_total_effect'] if result['true_total_effect'] > 0 else 0
+            
+            print(f"実際に処置した人数: {result['n_treated']}")
+            print("  N\t効果総和\t効率\t改善率\t備考")
+            print(f"  {result['n_treated']}\t{top_actual_count_effect_sum:.2f}\t{top_actual_count_efficiency:.2f} ({top_actual_count_efficiency*100:.1f}%)\t{top_actual_count_improvement:.2f}倍\t実際の処置人数")
+            
+            # 上位N人による評価（実際の処置数を含む）
+            print("\n上位N人に処置した場合の効果:")
+            print("  N\t効果総和\t効率\t改善率\t備考")
+            # その他の1000刻みの評価も表示
+            for n in range(1000, 10001, 1000):
+                # 上位n人を処置対象として選択
+                top_n_indices = np.argsort(-ite_pred.flatten())[:n]
+                top_n_effect_sum = np.sum(true_ite[top_n_indices])
+                
+                # 効率とROI計算
+                top_n_efficiency = top_n_effect_sum / result['true_total_effect'] if result['true_total_effect'] > 0 else 0
+                top_n_improvement = top_n_effect_sum / result['true_total_effect'] if result['true_total_effect'] > 0 else 0
+                
+                # 実際の処置人数と同じ場合は注釈を追加
+                note = "実際の処置人数" if n == result['n_treated'] else ""
+                
+                print(f"  {n}\t{top_n_effect_sum:.2f}\t{top_n_efficiency:.2f} ({top_n_efficiency*100:.1f}%)\t{top_n_improvement:.2f}倍\t{note}")
+
     else:
-        # 引数指定がない場合は、以前のコードで全モデルを比較
-        print("\n===== 分類器と回帰器の両方を使ったモデル比較 =====")
-        # ここに従来の全モデル比較コードが続く
+        print(f"エラー: モデル{causal_model_name}の学習関数がありません")
 
     print(f"\n===== {causal_model_name}モデルの評価完了 =====")
 

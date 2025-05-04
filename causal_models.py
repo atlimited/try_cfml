@@ -37,12 +37,14 @@ def ensure_dataframe(X):
     else:  # numpy配列
         return pd.DataFrame(X, columns=[f'feature_{i}' for i in range(X.shape[1])])
 
-def train_s_learner(X, treatment, outcome, model_type='classification', propensity_score=None, test_data=None):
+def train_s_learner(X, treatment, outcome, prediction_method='classification', propensity_score=None, test_data=None):
     """S-Learnerモデルの学習と予測"""
-    if model_type == 'classification':
+    if prediction_method == 'regression':
+        model = BaseSRegressor(learner=lgb.LGBMRegressor(**get_model_params('regression')))
+    elif prediction_method == 'classification':
         model = BaseSClassifier(learner=lgb.LGBMClassifier(**get_model_params('classification')))
     else:
-        model = BaseSRegressor(learner=lgb.LGBMRegressor(**get_model_params('regression')))
+        raise ValueError(f"不正な予測方法: {prediction_method}")
     
     # DataFrameに変換
     X_df = ensure_dataframe(X)
@@ -52,12 +54,14 @@ def train_s_learner(X, treatment, outcome, model_type='classification', propensi
 
     return model
     
-def train_t_learner(X, treatment, outcome, model_type='classification', test_data=None):
+def train_t_learner(X, treatment, outcome, prediction_method='classification', propensity_score=None, test_data=None):
     """T-Learnerモデルの学習と予測"""
-    if model_type == 'classification':
+    if prediction_method == 'regression':
+        model = BaseTRegressor(learner=lgb.LGBMRegressor(**get_model_params('regression')))
+    elif prediction_method == 'classification':
         model = BaseTClassifier(learner=lgb.LGBMClassifier(**get_model_params('classification')))
     else:
-        model = BaseTRegressor(learner=lgb.LGBMRegressor(**get_model_params('regression')))
+        raise ValueError(f"不正な予測方法: {prediction_method}")
     
     # DataFrameに変換
     X_df = ensure_dataframe(X)
@@ -67,9 +71,14 @@ def train_t_learner(X, treatment, outcome, model_type='classification', test_dat
 
     return model
     
-def train_x_learner(X, treatment, outcome, propensity_score=None, test_data=None):
+def train_x_learner(X, treatment, outcome, prediction_method='regression', propensity_score=None, test_data=None):
     """X-Learnerモデルの学習と予測"""
-    model = BaseXRegressor(learner=lgb.LGBMRegressor(**get_model_params('regression')))
+    if prediction_method == 'regression':
+        model = BaseXRegressor(learner=lgb.LGBMRegressor(**get_model_params('regression')))
+    elif prediction_method == 'classification':
+        raise ValueError(f"X-Learnerは分類問題に対応していません: {prediction_method}")
+    else:
+        raise ValueError(f"不正な予測方法: {prediction_method}")
     
     # DataFrameに変換
     X_df = ensure_dataframe(X)
@@ -79,9 +88,14 @@ def train_x_learner(X, treatment, outcome, propensity_score=None, test_data=None
 
     return model
     
-def train_r_learner(X, treatment, outcome, test_data=None):
+def train_r_learner(X, treatment, outcome, prediction_method='regression', propensity_score=None, test_data=None):
     """R-Learnerモデルの学習と予測"""
-    model = BaseRRegressor(learner=lgb.LGBMRegressor(**get_model_params('regression')))
+    if prediction_method == 'regression':
+        model = BaseRRegressor(learner=lgb.LGBMRegressor(**get_model_params('regression')))
+    elif prediction_method == 'classification':
+        raise ValueError(f"R-Learnerは分類問題に対応していません: {prediction_method}")
+    else:
+        raise ValueError(f"不正な予測方法: {prediction_method}")
     
     # DataFrameに変換
     X_df = ensure_dataframe(X)
@@ -91,9 +105,14 @@ def train_r_learner(X, treatment, outcome, test_data=None):
 
     return model
 
-def train_dr_learner(X, treatment, outcome, propensity_score=None, test_data=None):
+def train_dr_learner(X, treatment, outcome, prediction_method='regression', propensity_score=None, test_data=None):
     """DR-Learner (Doubly Robust) モデルの学習と予測"""
-    model = BaseDRLearner(learner=lgb.LGBMRegressor(**get_model_params('regression')))
+    if prediction_method == 'regression':
+        model = BaseDRLearner(learner=lgb.LGBMRegressor(**get_model_params('regression')))
+    elif prediction_method == 'classification':
+        raise ValueError(f"DR-Learnerは分類問題に対応していません: {prediction_method}")
+    else:
+        raise ValueError(f"不正な予測方法: {prediction_method}")
     
     # DataFrameに変換
     X_df = ensure_dataframe(X)
