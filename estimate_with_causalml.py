@@ -130,19 +130,32 @@ def main():
                       help='交差検証のfold数（デフォルト: 2）')
     args = parser.parse_args()
     
-    if args.causal_model_name is not None:
+    # 引数の解析
+    if args.causal_model_name is not None and args.uplift_method is None and args.prediction_method is None:
+        # 従来方式: s_learner_classificationのような形式
         causal_model_name = args.causal_model_name
         # s_learner_classificationのように複数の_がある場合に対応
-        parts = causal_model_name.split("_")
-        if len(parts) >= 2:
-            uplift_method = parts[0]
-            prediction_method = "_".join(parts[1:])
+        if '_' in causal_model_name:
+            parts = causal_model_name.split("_")
+            if len(parts) >= 2:
+                uplift_method = parts[0]
+                prediction_method = "_".join(parts[1:])
+            else:
+                print("無効なモデル名です。'uplift_method_prediction_method'の形式で指定してください。")
+                exit()
         else:
-            print("無効なモデル名です。'uplift_method_prediction_method'の形式で指定してください。")
-            exit()
+            # _がない場合はuplift_methodのみと解釈し、デフォルトのprediction_methodを使用
+            uplift_method = causal_model_name
+            prediction_method = "classification"  # デフォルト値
     elif args.uplift_method is not None and args.prediction_method is not None:
+        # 新方式: --uplift_method s_learner --prediction_method classification
         uplift_method = args.uplift_method
         prediction_method = args.prediction_method
+        causal_model_name = f"{uplift_method}_{prediction_method}"
+    elif args.causal_model_name is not None and (args.uplift_method is not None or args.prediction_method is not None):
+        # 混合方式: 両方指定された場合は個別指定を優先
+        uplift_method = args.uplift_method if args.uplift_method is not None else args.causal_model_name
+        prediction_method = args.prediction_method if args.prediction_method is not None else "classification"
         causal_model_name = f"{uplift_method}_{prediction_method}"
     else:
         print("モデル名が指定されていません。--causal_model_name または --uplift_method と --prediction_method を指定してください。")
@@ -245,11 +258,7 @@ def main():
         # 計算するN値のリスト
         ns = [500, 1000, 2000]
         
-        if 'true_ite' in df.columns:
-            true_ite = df['true_ite'].values
-            top_n_results = calculate_top_n_ate(ite_pred, treatment, outcome, ns=ns, true_ite=true_ite)
-        else:
-            top_n_results = calculate_top_n_ate(ite_pred, treatment, outcome, ns=ns)
+        top_n_results = calculate_top_n_ate(ite_pred, treatment, outcome, ns=ns)
 
         # 結果の表示
         for n, result in top_n_results.items():
@@ -274,29 +283,56 @@ def main():
                 # 処置群または非処置群のサンプルが不足している場合
                 print(f"  注意: 上位{n}人の中に処置群と非処置群の両方が十分にありません")
             
-            # 真のITEがある場合
-            if 'true_ite_mean' in result:
-                print(f"\n  真のITE情報:")
-                print(f"    真のITE平均: {result['true_ite_mean']:.4f}")
-                print(f"    正のITE割合: {result['positive_ite_ratio']*100:.1f}%")
-                print(f"    真のITEに基づく総効果: {result['true_total_effect']:.4f}")
-                
-                # 真の改善率
-                print(f"\n  真の効果での比較:")
-                print(f"    上位{n}人処置の真の効果: {result['true_n_effect']:.4f}")
-                print(f"    元の処置戦略の真の効果: {result['original_true_effect']:.4f}")
-                print(f"    真の改善率: {result['true_improvement_ratio']:.2f}倍")
+            ## 真のITEがある場合
+            #if 'true_ite_mean' in result:
+            #    print(f"\n  真のITE情報:")
+            #    print(f"    真のITE平均: {result['true_ite_mean']:.4f}")
+            #    print(f"    正のITE割合: {result['positive_ite_ratio']*100:.1f}%")
+            #    print(f"    真のITEに基づく総効果: {result['true_total_effect']:.4f}")
+            #    
+            #    # 真の改善率
+            #    print(f"\n  真の効果での比較:")
+            #    print(f"    上位{n}人処置の真の効果: {result['true_n_effect']:.4f}")
+            #    print(f"    元の処置戦略の真の効果: {result['original_true_effect']:.4f}")
+            #    print(f"    真の改善率: {result['true_improvement_ratio']:.2f}倍")
             
-            # 実際の処置人数での評価を追加
-            top_actual_count_indices = np.argsort(-ite_pred.flatten())[:result['n_treated']]
-            top_actual_count_effect_sum = np.sum(true_ite[top_actual_count_indices])
-            top_actual_count_efficiency = top_actual_count_effect_sum / result['true_total_effect'] if result['true_total_effect'] > 0 else 0
-            top_actual_count_improvement = top_actual_count_effect_sum / result['true_total_effect'] if result['true_total_effect'] > 0 else 0
             
-            print(f"実際に処置した人数: {result['n_treated']}")
+        # 真のITEがある場合
+        if 'true_ite' in df.columns:
+            true_ite = df['true_ite'].values
+            print("\nオラクルを使った評価")
+            
+            # 上位N人による評価
+            print("\n上位N人に処置した場合の効果:")
             print("  N\t効果総和\t効率\t改善率\t備考")
-            print(f"  {result['n_treated']}\t{top_actual_count_effect_sum:.2f}\t{top_actual_count_efficiency:.2f} ({top_actual_count_efficiency*100:.1f}%)\t{top_actual_count_improvement:.2f}倍\t実際の処置人数")
             
+            # 元の処置戦略の効果
+            original_treated_indices = np.where(treatment == 1)[0]
+            original_effect_sum = np.sum(true_ite[original_treated_indices])
+            
+            for n in sorted(list(top_n_results.keys()) + [len(original_treated_indices)]):
+                # 上位n人のインデックス
+                top_n_indices = np.argsort(-ite_pred.flatten())[:n]
+                
+                # 上位n人の効果
+                top_n_effect_sum = np.sum(true_ite[top_n_indices])
+                
+                # 効率（全体の効果に対する割合）
+                total_effect = np.sum(true_ite)
+                top_n_efficiency = top_n_effect_sum / total_effect if total_effect > 0 else 0
+                
+                # 改善率（元の処置戦略に対する改善度）
+                top_n_improvement = top_n_effect_sum / original_effect_sum if original_effect_sum > 0 else 0
+                
+                # 備考
+                note = ""
+                if n == len(original_treated_indices):
+                    note = "元の処置人数"
+                elif n in top_n_results:
+                    note = ""
+                
+                print(f"  {n}\t{top_n_effect_sum:.2f}\t{top_n_efficiency:.2f} ({top_n_efficiency*100:.1f}%)\t{top_n_improvement:.2f}倍\t{note}")
+        
             # 上位N人による評価（実際の処置数を含む）
             print("\n上位N人に処置した場合の効果:")
             print("  N\t効果総和\t効率\t改善率\t備考")
@@ -307,11 +343,11 @@ def main():
                 top_n_effect_sum = np.sum(true_ite[top_n_indices])
                 
                 # 効率とROI計算
-                top_n_efficiency = top_n_effect_sum / result['true_total_effect'] if result['true_total_effect'] > 0 else 0
-                top_n_improvement = top_n_effect_sum / result['true_total_effect'] if result['true_total_effect'] > 0 else 0
+                top_n_efficiency = top_n_effect_sum / total_effect if total_effect > 0 else 0
+                top_n_improvement = top_n_effect_sum / original_effect_sum if original_effect_sum > 0 else 0
                 
                 # 実際の処置人数と同じ場合は注釈を追加
-                note = "実際の処置人数" if n == result['n_treated'] else ""
+                note = "実際の処置人数" if n == len(original_treated_indices) else ""
                 
                 print(f"  {n}\t{top_n_effect_sum:.2f}\t{top_n_efficiency:.2f} ({top_n_efficiency*100:.1f}%)\t{top_n_improvement:.2f}倍\t{note}")
 

@@ -15,161 +15,164 @@ from obp.ope.estimators import DoublyRobust, DirectMethod, InverseProbabilityWei
 from obp.ope import OffPolicyEvaluation
 
 def load_and_preprocess_data(csv_path):
-    """CSVファイルからデータを読み込み、OBP形式に変換する"""
+    """データの読み込みと前処理"""
     print(f"CSVファイルを読み込み: {csv_path}")
-    # データの読み込み
     df = pd.read_csv(csv_path)
     print(f"データフレームの形状: {df.shape}")
     print(f"カラム: {df.columns.tolist()}")
+    print(df.head())
     
-    # 必要な列の抽出
-    # 特徴量 (context)
-    #X = df[['age', 'homeownership']].values
-    X = df[['age', 'homeownership', 'response_group']].values
-    
-    # 処置 (action) - 0/1をactionとして扱う
+    # 特徴量、処置、結果を抽出
+    X = df[['age', 'homeownership']].values
+    # 特徴量はage, homeownershipに加えて、response_groupも使用
+    #X = df[['age', 'homeownership', 'response_group']].values
     A = df['treatment'].values
-    
-    # 結果 (reward) - outcomeを報酬として扱う
     R = df['outcome'].values
     
-    # 傾向スコア (propensity_score)
+    # 傾向スコア（オラクル情報がある場合はそれを使用、なければ0.5で固定）
     if 'propensity_score' in df.columns:
         p_b = df['propensity_score'].values
     else:
-        # 傾向スコアがない場合は一様分布を仮定
-        p_b = np.ones_like(A) / 2
+        p_b = np.ones(len(df)) * 0.5
     
-    # OBP用のバンディットフィードバックを作成
-    n_rounds = len(df)
-    n_actions = 2  # 0と1の2つのアクション
+    # 元のログ方策の行動確率を計算
+    # 処置を受けた場合は傾向スコア、受けなかった場合は1-傾向スコア
+    p_b_original = np.zeros(len(df))
+    p_b_original[A == 1] = p_b[A == 1]  # 処置を受けた場合
+    p_b_original[A == 0] = 1 - p_b[A == 0]  # 処置を受けなかった場合
     
+    # バンディットフィードバックの形式に変換
     bandit_feedback = {
-        "n_rounds": n_rounds,
-        "n_actions": n_actions,
+        "n_rounds": len(df),
+        "n_actions": 2,  # 処置あり/なしの2アクション
+        "context": X,
         "action": A,
         "reward": R,
-        "position": np.zeros(n_rounds, dtype=int),  # positionは使用しない場合は0
-        "pscore": p_b,
-        "context": X,
-        "action_context": np.eye(n_actions),  # 各アクションの特徴量（単位行列）
+        "position": np.zeros(len(df), dtype=int),  # 単一アクションの場合は0で固定
+        "pscore": p_b  # 傾向スコア
     }
     
-    # ランダム方策のアクション分布を計算（評価対象の方策）
-    random_policy = Random(n_actions=n_actions)
+    # ランダム方策の行動確率を計算
+    # 処置割合を20%に設定
+    treatment_ratio = 0.2
     
-    # 均等な確率分布ではなく、ランダムに選んだ2000人に処置する方策を作成
-    p_e_random = np.zeros((n_rounds, n_actions))
-    # デフォルトでは全員に処置しない
-    p_e_random[:, 0] = 1.0
-    p_e_random[:, 1] = 0.0
-    
-    # ランダムに2000人を選択して処置
+    # ランダムに20%のユーザーを選んで処置する方策
     np.random.seed(42)  # 再現性のために乱数シードを固定
-    random_indices = np.random.choice(n_rounds, size=2000, replace=False)
-    p_e_random[random_indices, 0] = 0.0
-    p_e_random[random_indices, 1] = 1.0
+    random_indices = np.random.choice(len(df), size=int(len(df) * treatment_ratio), replace=False)
     
-    # ディメンションの確認
+    # 初期化（すべて非処置）
+    p_e_random = np.zeros((len(df), 2))
+    p_e_random[:, 0] = 1.0  # すべての行の非処置確率を1に
+    
+    # ランダムに選んだユーザーのみ処置に変更
+    p_e_random[random_indices, 0] = 0.0  # 非処置確率を0に
+    p_e_random[random_indices, 1] = 1.0  # 処置確率を1に
+    
+    # 確率分布の検証（各行の合計が1になることを確認）
+    assert np.allclose(np.sum(p_e_random, axis=1), 1.0), "ランダム方策が確率分布になっていません"
+    
     print(f"ランダム方策のアクション分布の形状: {p_e_random.shape}, 次元数: {p_e_random.ndim}")
     print(f"ランダム方策での処置人数: {np.sum(p_e_random[:, 1])}")
     
-    # 必要なら3次元に変換
-    if p_e_random.ndim == 2:
-        p_e_random = np.expand_dims(p_e_random, axis=2)
-        print(f"3次元に変換後のランダム方策の形状: {p_e_random.shape}")
-
-    # ITE予測値に基づいた方策
-    # ite_predの上位2000人を選択する方策
-    p_e_ite = np.zeros((n_rounds, n_actions))
+    # 3次元に変換（n_rounds, n_actions, len_list）
+    p_e_random = p_e_random.reshape(len(df), 2, 1)
+    print(f"3次元に変換後のランダム方策の形状: {p_e_random.shape}")
     
+    # 元のログ方策の行動確率を計算
+    p_e_original = np.zeros((len(df), 2))
+    # 処置を受けた人は処置確率=1、非処置確率=0
+    p_e_original[A == 1, 1] = 1.0
+    p_e_original[A == 1, 0] = 0.0
+    # 処置を受けなかった人は処置確率=0、非処置確率=1
+    p_e_original[A == 0, 0] = 1.0
+    p_e_original[A == 0, 1] = 0.0
+    
+    # 確率分布の検証（各行の合計が1になることを確認）
+    assert np.allclose(np.sum(p_e_original, axis=1), 1.0), "元のログ方策が確率分布になっていません"
+    
+    p_e_original = p_e_original.reshape(len(df), 2, 1)
+    
+    # ITE予測値に基づく方策の行動確率を計算
     if 'ite_pred' in df.columns:
-        # ite_predを取得
+        # ITE予測値の上位20%に処置を割り当てる方策
         ite_pred = df['ite_pred'].values
+        top_indices = np.argsort(-ite_pred)[:int(len(df) * treatment_ratio)]
         
-        # ite_predの上位2000人のインデックスを取得
-        top_2000_indices = np.argsort(-ite_pred)[:2000]
+        # 初期化（すべて非処置）
+        p_e_ite = np.zeros((len(df), 2))
+        p_e_ite[:, 0] = 1.0  # すべての行の非処置確率を1に
         
-        # 方策分布の作成
-        # デフォルトでは全員に処置しない（action=0）
-        p_e_ite[:, 0] = 1.0
-        p_e_ite[:, 1] = 0.0
-        
-        # 上位2000人には処置する（action=1）
-        p_e_ite[top_2000_indices, 0] = 0.0
-        p_e_ite[top_2000_indices, 1] = 1.0
+        # 上位20%のみ処置に変更
+        p_e_ite[top_indices, 0] = 0.0  # 非処置確率を0に
+        p_e_ite[top_indices, 1] = 1.0  # 処置確率を1に
         
         print(f"ITE方策の形状: {p_e_ite.shape}, 次元数: {p_e_ite.ndim}")
         
         # 3次元に変換
-        if p_e_ite.ndim == 2:
-            p_e_ite = np.expand_dims(p_e_ite, axis=2)
-            print(f"3次元に変換後のITE方策の形状: {p_e_ite.shape}")
+        p_e_ite = p_e_ite.reshape(len(df), 2, 1)
+        print(f"3次元に変換後のITE方策の形状: {p_e_ite.shape}")
         
-        print(f"ITE予測値の上位2000人に処置するポリシーを作成しました")
-        print(f"処置割合: {len(top_2000_indices) / n_rounds * 100:.2f}%")
+        print(f"ITE予測値の上位{int(len(df) * treatment_ratio)}人に処置するポリシーを作成しました")
+        print(f"処置割合: {treatment_ratio*100:.2f}%")
     else:
-        print("警告: ite_predカラムが見つかりません。ランダム方策を使用します。")
-        p_e_ite = p_e_random
+        p_e_ite = None
     
-    # オラクル（true_ite）に基づく方策
-    p_e_oracle = np.zeros((n_rounds, n_actions))
-    p_e_oracle_top = np.zeros((n_rounds, n_actions))
-    
+    # オラクル情報（真のITE）がある場合、それに基づく最適方策を作成
     if 'true_ite' in df.columns:
-        # true_iteを取得
         true_ite = df['true_ite'].values
         
-        # 方策1: true_iteが正の人全員に処置する最適方策
-        # デフォルトでは全員に処置しない
-        p_e_oracle[:, 0] = 1.0
-        p_e_oracle[:, 1] = 0.0
-        
-        # true_iteが正の人には処置する
+        # 真のITEが正の人すべてに処置を割り当てる方策
         positive_ite_indices = np.where(true_ite > 0)[0]
-        p_e_oracle[positive_ite_indices, 0] = 0.0
-        p_e_oracle[positive_ite_indices, 1] = 1.0
+        
+        # 初期化（すべて非処置）
+        p_e_oracle = np.zeros((len(df), 2))
+        p_e_oracle[:, 0] = 1.0  # すべての行の非処置確率を1に
+        
+        # 真のITEが正の人のみ処置に変更
+        p_e_oracle[positive_ite_indices, 0] = 0.0  # 非処置確率を0に
+        p_e_oracle[positive_ite_indices, 1] = 1.0  # 処置確率を1に
+        
+        # 3次元に変換
+        p_e_oracle = p_e_oracle.reshape(len(df), 2, 1)
         
         print(f"オラクル最適方策での処置人数: {len(positive_ite_indices)}")
         
-        # 方策2: true_iteの上位2000人に処置する方策
-        # デフォルトでは全員に処置しない
-        p_e_oracle_top[:, 0] = 1.0
-        p_e_oracle_top[:, 1] = 0.0
+        # 真のITEの上位20%に処置を割り当てる方策
+        top_true_ite_indices = np.argsort(-true_ite)[:int(len(df) * treatment_ratio)]
         
-        # true_iteの上位2000人を選択
-        oracle_top_indices = np.argsort(-true_ite)[:2000]
-        p_e_oracle_top[oracle_top_indices, 0] = 0.0
-        p_e_oracle_top[oracle_top_indices, 1] = 1.0
+        # 初期化（すべて非処置）
+        p_e_oracle_top = np.zeros((len(df), 2))
+        p_e_oracle_top[:, 0] = 1.0  # すべての行の非処置確率を1に
         
-        print(f"オラクル上位2000人方策での処置人数: {len(oracle_top_indices)}")
+        # 上位20%のみ処置に変更
+        p_e_oracle_top[top_true_ite_indices, 0] = 0.0  # 非処置確率を0に
+        p_e_oracle_top[top_true_ite_indices, 1] = 1.0  # 処置確率を1に
         
         # 3次元に変換
-        if p_e_oracle.ndim == 2:
-            p_e_oracle = np.expand_dims(p_e_oracle, axis=2)
-        if p_e_oracle_top.ndim == 2:
-            p_e_oracle_top = np.expand_dims(p_e_oracle_top, axis=2)
+        p_e_oracle_top = p_e_oracle_top.reshape(len(df), 2, 1)
         
-        # 予測ITEとtrue_ITEの相関係数を計算
+        print(f"オラクル上位{int(len(df) * treatment_ratio)}人方策での処置人数: {int(len(df) * treatment_ratio)}")
+        
+        # 予測ITEと真のITEの相関を計算
         if 'ite_pred' in df.columns:
-            corr = np.corrcoef(ite_pred, true_ite)[0, 1]
-            print(f"\n予測ITEと真のITEの相関係数: {corr:.4f}")
+            correlation = np.corrcoef(ite_pred, true_ite)[0, 1]
+            print(f"\n予測ITEと真のITEの相関係数: {correlation:.4f}")
             
-            # 予測上位2000人と真のITE上位2000人の一致度
-            match_count = np.intersect1d(top_2000_indices, oracle_top_indices).size
-            match_percentage = match_count / 2000 * 100
-            print(f"予測上位2000人と真のITE上位2000人の一致数: {match_count}人")
-            print(f"一致率: {match_percentage:.2f}%")
+            # 予測上位と真のITE上位の一致度を計算
+            pred_top = set(np.argsort(-ite_pred)[:int(len(df) * treatment_ratio)])
+            true_top = set(np.argsort(-true_ite)[:int(len(df) * treatment_ratio)])
+            overlap = len(pred_top.intersection(true_top))
+            print(f"予測上位{int(len(df) * treatment_ratio)}人と真のITE上位{int(len(df) * treatment_ratio)}人の一致数: {overlap}人")
+            print(f"一致率: {overlap/int(len(df) * treatment_ratio):.2%}")
             
-            # 方策の比較
-            pred_policy_agreement = np.mean(p_e_ite[:, :, 0] == p_e_oracle_top[:, :, 0])
-            print(f"予測方策と真のITE上位方策の一致率: {pred_policy_agreement * 100:.2f}%")
+            # 予測方策と真のITE上位方策の一致率
+            policy_match = np.mean((p_e_ite[:, 1, 0] > 0) == (p_e_oracle_top[:, 1, 0] > 0))
+            print(f"予測方策と真のITE上位方策の一致率: {policy_match:.2%}")
     else:
-        print("警告: true_iteカラムが見つかりません。オラクル方策は評価できません。")
         p_e_oracle = None
         p_e_oracle_top = None
     
-    return X, A, R, p_b, bandit_feedback, p_e_random, p_e_ite, p_e_oracle, p_e_oracle_top, df
+    return X, A, R, p_b, bandit_feedback, p_e_random, p_e_original, p_e_ite, p_e_oracle, p_e_oracle_top, df
 
 def main():
     parser = argparse.ArgumentParser(description='OBPを使用したDoubly Robust評価')
@@ -177,7 +180,7 @@ def main():
     args = parser.parse_args()
     
     # 1) データの読み込みと前処理
-    X, A, R, p_b, bandit_feedback, p_e_random, p_e_ite, p_e_oracle, p_e_oracle_top, df = load_and_preprocess_data(args.csv)
+    X, A, R, p_b, bandit_feedback, p_e_random, p_e_original, p_e_ite, p_e_oracle, p_e_oracle_top, df = load_and_preprocess_data(args.csv)
     
     print("\n=== データサンプル ===")
     print("特徴量 (X)の最初の5行:")
@@ -229,7 +232,18 @@ def main():
     for estimator_name, value in result_random.items():
         print(f"{estimator_name}: {value:.4f}")
     
-    # 6) OPE実行 - ITE予測値に基づく方策
+    # 6) OPE実行 - 元のログ方策
+    print("\n=== 元のログ方策の評価 ===")
+    result_original = ope.estimate_policy_values(
+        action_dist=p_e_original,
+        estimated_rewards_by_reg_model=estimated_rewards_by_reg_model
+    )
+    
+    print("\n=== 元のログ方策のOff-Policy Evaluation Results ===")
+    for estimator_name, value in result_original.items():
+        print(f"{estimator_name}: {value:.4f}")
+    
+    # 7) OPE実行 - ITE予測値に基づく方策
     print("\n=== ITE予測値の上位2000人に処置する方策の評価 ===")
     result_ite = ope.estimate_policy_values(
         action_dist=p_e_ite,
@@ -240,9 +254,10 @@ def main():
     for estimator_name, value in result_ite.items():
         print(f"{estimator_name}: {value:.4f}")
     
-    # 7) オラクル方策の評価
+    # 8) オラクル方策の評価
     results_dict = {
         'ランダム方策': result_random,
+        '元のログ方策': result_original,
         'ITE上位方策': result_ite
     }
     
@@ -272,65 +287,74 @@ def main():
         
         results_dict['オラクル上位方策'] = result_oracle_top
     
-    # 8) 全方策比較
+    # 9) 全方策比較
     print("\n=== 全方策比較 ===")
     
     # オラクル評価値の取得
     if 'true_ite' in df.columns:
         true_ite = df['true_ite'].values
         
-        # 各方策が選んだ人々のtrue_iteの平均
         random_indices = np.where(p_e_random[:, :, 0][..., 1] == 1.0)[0]
         random_policy_true_effect = np.mean(true_ite[random_indices])
+        
+        original_indices = np.where(p_e_original[:, :, 0][..., 1] == 1.0)[0]
+        original_policy_true_effect = np.mean(true_ite[original_indices])
         
         ite_top_indices = np.where(p_e_ite[:, :, 0][..., 1] == 1.0)[0]
         ite_policy_true_effect = np.mean(true_ite[ite_top_indices])
         
-        oracle_top_indices = np.argsort(-true_ite)[:2000]
+        oracle_top_indices = np.where(p_e_oracle_top[:, :, 0][..., 1] == 1.0)[0]
         oracle_top_mean_ite = np.mean(true_ite[oracle_top_indices])
         
-        # オラクル行を追加
-        print(f"{'推定手法':20} " + " ".join([f"{name:20}" for name in results_dict.keys()]))
+        # 表のデータを作成
+        comparison_data = {
+            '推定手法': ['dr', 'dm', 'ipw', 'オラクル評価'],
+            'ランダム方策': [result_random['dr'], result_random['dm'], result_random['ipw'], random_policy_true_effect],
+            '元のログ方策': [result_original['dr'], result_original['dm'], result_original['ipw'], original_policy_true_effect],
+            'ITE上位方策': [result_ite['dr'], result_ite['dm'], result_ite['ipw'], ite_policy_true_effect]
+        }
         
-        # DR, DM, IPWの結果表示
-        for estimator in ['dr', 'dm', 'ipw']:
-            values = [results[estimator] for results in results_dict.values()]
-            values_str = " ".join([f"{value:.4f}              " for value in values])
-            print(f"{estimator:20} {values_str}")
-        
-        # オラクル評価行を追加
-        oracle_values = [random_policy_true_effect, ite_policy_true_effect]
         if 'オラクル最適方策' in results_dict:
-            # true_ite > 0の人全員の平均値も加える
-            positive_ite_mean = np.mean(true_ite[true_ite > 0])
-            oracle_values.append(positive_ite_mean)
+            comparison_data['オラクル最適方策'] = [
+                results_dict['オラクル最適方策']['dr'],
+                results_dict['オラクル最適方策']['dm'],
+                results_dict['オラクル最適方策']['ipw'],
+                np.mean(true_ite[true_ite > 0])
+            ]
+            
         if 'オラクル上位方策' in results_dict:
-            oracle_values.append(oracle_top_mean_ite)
+            comparison_data['オラクル上位方策'] = [
+                results_dict['オラクル上位方策']['dr'],
+                results_dict['オラクル上位方策']['dm'],
+                results_dict['オラクル上位方策']['ipw'],
+                oracle_top_mean_ite
+            ]
         
-        oracle_values_str = " ".join([f"{value:.4f}              " for value in oracle_values])
-        print(f"{'オラクル評価':20} {oracle_values_str}")
-    else:
-        # 通常の表示（オラクルなし）
-        print(f"{'推定手法':20} " + " ".join([f"{name:20}" for name in results_dict.keys()]))
-        
-        for estimator in ['dr', 'dm', 'ipw']:
-            values = [results[estimator] for results in results_dict.values()]
-            values_str = " ".join([f"{value:.4f}              " for value in values])
-            print(f"{estimator:20} {values_str}")
+        # DataFrameに変換して表示
+        comparison_df = pd.DataFrame(comparison_data)
+        comparison_df = comparison_df.set_index('推定手法')
+        print(comparison_df.round(4))
     
-    # 9) ランダム方策との比較（改善率）
+    # 10) ランダム方策との比較（改善率）
     print("\n=== ランダム方策からの改善率 ===")
-    print(f"{'推定手法':20} " + " ".join([f"{name:20}" for name in list(results_dict.keys())[1:]]))
     
-    for estimator in ['dr', 'dm', 'ipw']:
-        random_value = results_dict['ランダム方策'][estimator]
-        improvements = [(results[estimator] - random_value) / random_value * 100 
-                        for name, results in results_dict.items() 
-                        if name != 'ランダム方策']
-        improvements_str = " ".join([f"{imp:.1f}%              " for imp in improvements])
-        print(f"{estimator:20} {improvements_str}")
+    # 改善率のデータを作成
+    improvement_data = {'推定手法': ['dr', 'dm', 'ipw']}
     
-    # 10) オラクル情報（true_ite）を使用した各方策の直接評価
+    for policy_name in list(results_dict.keys())[1:]:
+        improvements = []
+        for estimator in ['dr', 'dm', 'ipw']:
+            base_value = result_random[estimator]
+            improvement = (results_dict[policy_name][estimator] - base_value) / base_value * 100
+            improvements.append(f"{improvement:.1f}%")
+        improvement_data[policy_name] = improvements
+    
+    # DataFrameに変換して表示
+    improvement_df = pd.DataFrame(improvement_data)
+    improvement_df = improvement_df.set_index('推定手法')
+    print(improvement_df)
+    
+    # 11) オラクル情報（true_ite）を使用した各方策の直接評価
     if 'true_ite' in df.columns:
         print("\n=== オラクル情報（true_ite）による各方策の直接評価 ===")
         true_ite = df['true_ite'].values
@@ -339,6 +363,11 @@ def main():
         random_indices = np.where(p_e_random[:, :, 0][..., 1] == 1.0)[0]
         random_policy_true_effect = np.mean(true_ite[random_indices])
         print(f"\nランダム方策が選んだ2000人の真の平均処置効果: {random_policy_true_effect:.4f}")
+        
+        # 元のログ方策の評価
+        original_indices = np.where(p_e_original[:, :, 0][..., 1] == 1.0)[0]
+        original_policy_true_effect = np.mean(true_ite[original_indices])
+        print(f"\n元のログ方策が選んだ人の真の平均処置効果: {original_policy_true_effect:.4f}")
         
         # ITE予測上位方策の評価
         ite_top_indices = np.where(p_e_ite[:, :, 0][..., 1] == 1.0)[0]
@@ -366,23 +395,26 @@ def main():
         print(f"{'方策':20} {'真のITE平均値':15} {'選んだ正のITE人数':15} {'正のITE割合':15}")
         
         random_policy_positive_count = np.sum(true_ite[random_indices] > 0)
+        original_policy_positive_count = np.sum(true_ite[original_indices] > 0)
         ite_policy_positive_count = np.sum(true_ite[ite_top_indices] > 0)
         oracle_policy_positive_count = np.sum(true_ite[oracle_top_indices] > 0)
         
         print(f"{'ランダム方策':20} {random_policy_true_effect:.4f}       {random_policy_positive_count}       {random_policy_positive_count/len(random_indices)*100:.1f}%")
+        print(f"{'元のログ方策':20} {original_policy_true_effect:.4f}       {original_policy_positive_count}       {original_policy_positive_count/len(original_indices)*100:.1f}%")
         print(f"{'ITE予測上位方策':20} {ite_policy_true_effect:.4f}       {ite_policy_positive_count}       {ite_policy_positive_count/len(ite_top_indices)*100:.1f}%")
         print(f"{'オラクル上位方策':20} {oracle_top_mean_ite:.4f}       {oracle_policy_positive_count}       {oracle_policy_positive_count/len(oracle_top_indices)*100:.1f}%")
         
         # グラフ化可能な形式で保存
         policy_evaluation = {
-            'policy': ['ランダム方策', 'ITE予測上位方策', 'オラクル上位方策'],
-            'true_effect': [random_policy_true_effect, ite_policy_true_effect, oracle_top_mean_ite],
+            'policy': ['ランダム方策', '元のログ方策', 'ITE予測上位方策', 'オラクル上位方策'],
+            'true_effect': [random_policy_true_effect, original_policy_true_effect, ite_policy_true_effect, oracle_top_mean_ite],
             'positive_rate': [random_policy_positive_count/len(random_indices), 
+                              original_policy_positive_count/len(original_indices),
                               ite_policy_positive_count/len(ite_top_indices),
                               oracle_policy_positive_count/len(oracle_top_indices)]
         }
     
-    # 11) 処置効果の成功度合いを計算
+    # 12) 処置効果の成功度合いを計算
     treatment_success = np.mean(R[A == 1])
     control_success = np.mean(R[A == 0])
     print(f"\n=== 観測データからの単純な処置効果 ===")
