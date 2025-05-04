@@ -37,10 +37,20 @@ def ensure_dataframe(X):
 
 def estimate_ate_with_ipw(y, t, p):
     """逆確率重み付け法でATEを推定する"""
-    y1 = y[t == 1]
-    y0 = y[t == 0]
-    p1 = p[t == 1]
-    p0 = p[t == 0]
+    # NumPy配列に変換
+    y_arr = np.array(y)
+    t_arr = np.array(t)
+    p_arr = np.array(p)
+    
+    # ブール型インデックスを使用
+    treat_mask = (t_arr == 1)
+    control_mask = (t_arr == 0)
+    
+    # 処置群と対照群のアウトカムと傾向スコア
+    y1 = y_arr[treat_mask]
+    y0 = y_arr[control_mask]
+    p1 = p_arr[treat_mask]
+    p0 = p_arr[control_mask]
     
     # 処置群の逆確率重み
     w1 = 1 / p1
@@ -51,9 +61,10 @@ def estimate_ate_with_ipw(y, t, p):
     weighted_y1 = np.sum(y1 * w1) / np.sum(w1)
     weighted_y0 = np.sum(y0 * w0) / np.sum(w0)
     
-    # ATEの推定
-    ate_ipw = weighted_y1 - weighted_y0
-    return ate_ipw
+    # ATE = 処置群の重み付き平均 - 対照群の重み付き平均
+    ate = weighted_y1 - weighted_y0
+    
+    return ate
 
 def compute_propensity_scores(X, treatment, method='lightgbm', clip_bounds=(0.05, 0.95), oracle_score=None):
     """複数の手法で傾向スコアを計算し、結果を返す
@@ -65,43 +76,58 @@ def compute_propensity_scores(X, treatment, method='lightgbm', clip_bounds=(0.05
         clip_bounds: 傾向スコアの下限と上限
         oracle_score: オラクルの傾向スコア（存在する場合）
     """
-    propensity_scores = {}
-    
-    # オラクルスコアがある場合は追加
-    if oracle_score is not None:
-        propensity_scores['oracle'] = oracle_score
+    # 確実にNumPy配列として処理
+    treatment_array = np.array(treatment)
     
     # DataFrameに変換
     X_df = ensure_dataframe(X)
+    
+    # 返す傾向スコア
+    result = None
     
     if method == 'lightgbm' or method == 'all':
         # LightGBMによる傾向スコア計算
         ps_lgbm = lgb.LGBMClassifier(
             n_estimators=200,
             learning_rate=0.05,
-            num_leaves=31, 
             max_depth=5,
-            min_child_samples=30,
-            subsample=0.8,
-            colsample_bytree=0.8,
             random_state=42,
-            verbose=-1,  # 警告メッセージを抑制
-            objective='binary'
+            verbose=-1
         )
-        ps_lgbm.fit(X_df, treatment)
-        p_score_lgbm_raw = ps_lgbm.predict_proba(X_df)[:, 1]
-        p_score_lgbm = np.clip(p_score_lgbm_raw, clip_bounds[0], clip_bounds[1])
-        propensity_scores['lightgbm'] = p_score_lgbm
+        ps_lgbm.fit(X_df, treatment_array)
+        ps_pred_lgbm = ps_lgbm.predict_proba(X_df)[:, 1]
+        
+        # 極端な値を避けるためのクリッピング
+        ps_pred_lgbm = np.clip(ps_pred_lgbm, clip_bounds[0], clip_bounds[1])
+        
+        if method == 'lightgbm':
+            result = ps_pred_lgbm
     
     if method == 'logistic' or method == 'all':
         # ロジスティック回帰による傾向スコア計算
-        ps_logistic = LogisticRegression(random_state=42, max_iter=10000, solver='liblinear', C=0.1)
-        ps_logistic.fit(X_df, treatment)
-        p_score_logistic_raw = ps_logistic.predict_proba(X_df)[:, 1]
-        p_score_logistic = np.clip(p_score_logistic_raw, clip_bounds[0], clip_bounds[1])
-        propensity_scores['logistic'] = p_score_logistic
+        ps_logistic = LogisticRegression(random_state=42, max_iter=1000)
+        ps_logistic.fit(X_df, treatment_array)
+        ps_pred_logistic = ps_logistic.predict_proba(X_df)[:, 1]
+        
+        # 極端な値を避けるためのクリッピング
+        ps_pred_logistic = np.clip(ps_pred_logistic, clip_bounds[0], clip_bounds[1])
+        
+        if method == 'logistic':
+            result = ps_pred_logistic
     
-    return propensity_scores
+    if method == 'all':
+        # 辞書で複数の傾向スコアを返す
+        propensity_scores = {}
+        
+        # オラクルスコアがある場合は追加
+        if oracle_score is not None:
+            propensity_scores['oracle'] = np.array(oracle_score)
+        
+        propensity_scores['lightgbm'] = ps_pred_lgbm
+        propensity_scores['logistic'] = ps_pred_logistic
+        result = propensity_scores
+    
+    return result
 
 def evaluate_models(df, models, true_ite_col='true_ite', prefix='ite_'):
     """各モデルのITE予測と真のITEを比較し、評価指標を計算"""

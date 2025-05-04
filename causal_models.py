@@ -8,6 +8,8 @@ import warnings
 from causalml.inference.meta import BaseSClassifier, BaseSRegressor, BaseTClassifier, BaseTRegressor, BaseXRegressor, BaseRRegressor, BaseDRLearner
 from sklearn.model_selection import KFold
 from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import RBF, ConstantKernel, Matern
 
 def get_model_params(model_type='classification'):
     """LightGBMモデルのパラメータを取得"""
@@ -126,47 +128,277 @@ def train_dr_learner(X, treatment, outcome, prediction_method='regression', prop
 
     return model
     
-def train_all_models(X, treatment, outcome, propensity_score):
-    """すべてのモデルを学習し、予測を返す"""
+def train_all_models(X, treatment, outcome, propensity_score=None, model_type='lgbm'):
+    """すべてのモデルを学習し、予測を返す
+    
+    Args:
+        X: 特徴量データフレーム
+        treatment: 処置フラグ
+        outcome: アウトカム
+        propensity_score: 傾向スコア（オプション）
+        model_type: 'lgbm'または'gpr'
+    """
     model_results = {}
     
     # DataFrameに変換
     X_df = ensure_dataframe(X)
     
-    # 1. S-Learner (分類器)
-    model_results['s_learner_cls'] = train_s_learner(
-        X_df, treatment, outcome, 'classification', propensity_score)
+    if model_type == 'lgbm':
+        # LightGBMモデルを使用
+        # 1. S-Learner (分類器)
+        model_results['s_learner_cls'] = train_s_learner(
+            X_df, treatment, outcome, 'classification', propensity_score)
+        
+        # 2. T-Learner (分類器)
+        model_results['t_learner_cls'] = train_t_learner(
+            X_df, treatment, outcome, 'classification')
+        
+        # 3. S-Learner (回帰器)
+        model_results['s_learner_reg'] = train_s_learner(
+            X_df, treatment, outcome, 'regression', propensity_score)
+        
+        # 4. T-Learner (回帰器)
+        model_results['t_learner_reg'] = train_t_learner(
+            X_df, treatment, outcome, 'regression')
+        
+        # 5. X-Learner
+        model_results['x_learner'] = train_x_learner(
+            X_df, treatment, outcome, propensity_score=propensity_score)
+        
+        # 6. R-Learner
+        model_results['r_learner'] = train_r_learner(
+            X_df, treatment, outcome)
+        
+        # 7. DR-Learner
+        model_results['dr_learner'] = train_dr_learner(
+            X_df, treatment, outcome, propensity_score=propensity_score)
     
-    # 2. T-Learner (分類器)
-    model_results['t_learner_cls'] = train_t_learner(
-        X_df, treatment, outcome, 'classification')
+    elif model_type == 'gpr':
+        # ガウス過程回帰モデルを使用
+        # 1. S-Learner (GPR)
+        model_results['s_learner_gpr'] = train_s_learner_gpr(
+            X_df, treatment, outcome, kernel_type='rbf', propensity_score=propensity_score)
+        
+        # 2. T-Learner (GPR)
+        model_results['t_learner_gpr'] = train_t_learner_gpr(
+            X_df, treatment, outcome, kernel_type='rbf')
+        
+        # 3. X-Learner (GPR)
+        model_results['x_learner_gpr'] = train_x_learner_gpr(
+            X_df, treatment, outcome, kernel_type='rbf', propensity_score=propensity_score)
+        
+        # 4. R-Learner (GPR)
+        model_results['r_learner_gpr'] = train_r_learner_gpr(
+            X_df, treatment, outcome, kernel_type='rbf')
+        
+        # 5. S-Learner (GPR - Matérn)
+        model_results['s_learner_gpr_matern'] = train_s_learner_gpr(
+            X_df, treatment, outcome, kernel_type='matern', propensity_score=propensity_score)
+        
+        # 6. S-Learner (GPR - 複合カーネル)
+        model_results['s_learner_gpr_combined'] = train_s_learner_gpr(
+            X_df, treatment, outcome, kernel_type='combined', propensity_score=propensity_score)
     
-    # 3. S-Learner (回帰器)
-    model_results['s_learner_reg'] = train_s_learner(
-        X_df, treatment, outcome, 'regression', propensity_score)
-    
-    # 4. T-Learner (回帰器)
-    model_results['t_learner_reg'] = train_t_learner(
-        X_df, treatment, outcome, 'regression')
-    
-    # 5. X-Learner
-    model_results['x_learner'] = train_x_learner(
-        X_df, treatment, outcome, propensity_score)
-    
-    # 6. R-Learner
-    model_results['r_learner'] = train_r_learner(
-        X_df, treatment, outcome)
-    
-    # 7. DR-Learner
-    model_results['dr_learner'] = train_dr_learner(
-        X_df, treatment, outcome, propensity_score)
+    else:
+        raise ValueError(f"不正なモデルタイプ: {model_type}。'lgbm'または'gpr'を指定してください。")
     
     return model_results
+
+def get_gpr_model(kernel_type='rbf'):
+    """ガウス過程回帰モデルを取得"""
+    if kernel_type == 'rbf':
+        # RBFカーネル（デフォルト）
+        kernel = ConstantKernel(1.0) * RBF(length_scale=1.0)
+    elif kernel_type == 'matern':
+        # Matérnカーネル
+        kernel = ConstantKernel(1.0) * Matern(length_scale=1.0, nu=1.5)
+    elif kernel_type == 'combined':
+        # 複合カーネル
+        kernel = ConstantKernel(1.0) * (RBF(length_scale=1.0) + Matern(length_scale=0.5, nu=1.5))
+    else:
+        raise ValueError(f"不正なカーネルタイプ: {kernel_type}")
+    
+    return GaussianProcessRegressor(
+        kernel=kernel,
+        alpha=1e-6,  # ノイズレベル
+        normalize_y=True,  # 出力の正規化
+        n_restarts_optimizer=10,  # カーネルパラメータの最適化の再スタート回数
+        random_state=42
+    )
+
+def train_s_learner_gpr(X, treatment, outcome, kernel_type='rbf', propensity_score=None, test_data=None, verbose=True):
+    """ガウス過程回帰を使用したS-Learnerモデルの学習と予測"""
+    # GPRモデルを取得
+    gpr = get_gpr_model(kernel_type)
+    
+    # S-Learnerモデルの初期化
+    model = BaseSRegressor(learner=gpr)
+    
+    # DataFrameに変換
+    X_df = ensure_dataframe(X)
+    
+    # 進捗表示用のラッパー
+    if verbose:
+        print(f"S-Learner (GPR-{kernel_type}) 学習開始...")
+        from tqdm import tqdm
+        import time
+        
+        original_fit = model.fit
+        
+        def fit_with_progress(*args, **kwargs):
+            print("処置群と対照群のモデルを学習中...")
+            with tqdm(total=100, desc="GPRモデル学習") as pbar:
+                # 学習開始
+                start_time = time.time()
+                result = original_fit(*args, **kwargs)
+                
+                # 進捗更新（実際の進捗は取得できないので、時間ベースで更新）
+                elapsed = time.time() - start_time
+                for i in range(100):
+                    pbar.update(1)
+                    time.sleep(elapsed / 200)  # 実際の学習時間の半分を進捗表示に使用
+                
+                print(f"GPRモデル学習完了 (所要時間: {elapsed:.2f}秒)")
+                return result
+        
+        model.fit = fit_with_progress
+    
+    # モデル学習
+    model.fit(X=X_df, treatment=treatment, y=outcome)
+
+    return model
+
+def train_t_learner_gpr(X, treatment, outcome, kernel_type='rbf', propensity_score=None, test_data=None, verbose=True):
+    """ガウス過程回帰を使用したT-Learnerモデルの学習と予測"""
+    # GPRモデルを取得
+    gpr = get_gpr_model(kernel_type)
+    
+    # T-Learnerモデルの初期化
+    model = BaseTRegressor(learner=gpr)
+    
+    # DataFrameに変換
+    X_df = ensure_dataframe(X)
+    
+    # 進捗表示用のラッパー
+    if verbose:
+        print(f"T-Learner (GPR-{kernel_type}) 学習開始...")
+        from tqdm import tqdm
+        import time
+        
+        original_fit = model.fit
+        
+        def fit_with_progress(*args, **kwargs):
+            print("処置群と対照群の別々のモデルを学習中...")
+            with tqdm(total=100, desc="GPRモデル学習") as pbar:
+                # 学習開始
+                start_time = time.time()
+                result = original_fit(*args, **kwargs)
+                
+                # 進捗更新（実際の進捗は取得できないので、時間ベースで更新）
+                elapsed = time.time() - start_time
+                for i in range(100):
+                    pbar.update(1)
+                    time.sleep(elapsed / 200)  # 実際の学習時間の半分を進捗表示に使用
+                
+                print(f"GPRモデル学習完了 (所要時間: {elapsed:.2f}秒)")
+                return result
+        
+        model.fit = fit_with_progress
+    
+    # モデル学習
+    model.fit(X=X_df, treatment=treatment, y=outcome)
+
+    return model
+
+def train_x_learner_gpr(X, treatment, outcome, kernel_type='rbf', propensity_score=None, test_data=None, verbose=True):
+    """ガウス過程回帰を使用したX-Learnerモデルの学習と予測"""
+    # GPRモデルを取得
+    gpr = get_gpr_model(kernel_type)
+    
+    # X-Learnerモデルの初期化
+    model = BaseXRegressor(learner=gpr)
+    
+    # DataFrameに変換
+    X_df = ensure_dataframe(X)
+    
+    # 進捗表示用のラッパー
+    if verbose:
+        print(f"X-Learner (GPR-{kernel_type}) 学習開始...")
+        from tqdm import tqdm
+        import time
+        
+        original_fit = model.fit
+        
+        def fit_with_progress(*args, **kwargs):
+            print("X-Learnerの複数モデルを学習中...")
+            with tqdm(total=100, desc="GPRモデル学習") as pbar:
+                # 学習開始
+                start_time = time.time()
+                result = original_fit(*args, **kwargs)
+                
+                # 進捗更新（実際の進捗は取得できないので、時間ベースで更新）
+                elapsed = time.time() - start_time
+                for i in range(100):
+                    pbar.update(1)
+                    time.sleep(elapsed / 200)  # 実際の学習時間の半分を進捗表示に使用
+                
+                print(f"GPRモデル学習完了 (所要時間: {elapsed:.2f}秒)")
+                return result
+        
+        model.fit = fit_with_progress
+    
+    # モデル学習
+    model.fit(X=X_df, treatment=treatment, y=outcome)
+
+    return model
+
+def train_r_learner_gpr(X, treatment, outcome, kernel_type='rbf', propensity_score=None, test_data=None, verbose=True):
+    """ガウス過程回帰を使用したR-Learnerモデルの学習と予測"""
+    # GPRモデルを取得
+    gpr = get_gpr_model(kernel_type)
+    
+    # R-Learnerモデルの初期化
+    model = BaseRRegressor(learner=gpr)
+    
+    # DataFrameに変換
+    X_df = ensure_dataframe(X)
+    
+    # 進捗表示用のラッパー
+    if verbose:
+        print(f"R-Learner (GPR-{kernel_type}) 学習開始...")
+        from tqdm import tqdm
+        import time
+        
+        original_fit = model.fit
+        
+        def fit_with_progress(*args, **kwargs):
+            print("R-Learnerの複数モデルを学習中...")
+            with tqdm(total=100, desc="GPRモデル学習") as pbar:
+                # 学習開始
+                start_time = time.time()
+                result = original_fit(*args, **kwargs)
+                
+                # 進捗更新（実際の進捗は取得できないので、時間ベースで更新）
+                elapsed = time.time() - start_time
+                for i in range(100):
+                    pbar.update(1)
+                    time.sleep(elapsed / 200)  # 実際の学習時間の半分を進捗表示に使用
+                
+                print(f"GPRモデル学習完了 (所要時間: {elapsed:.2f}秒)")
+                return result
+        
+        model.fit = fit_with_progress
+    
+    # モデル学習
+    model.fit(X=X_df, treatment=treatment, y=outcome)
+
+    return model
 
 # 以下、k-foldクロスバリデーション関連の関数を追加
 
 def evaluate_model_cv(X, treatment, outcome, true_ite=None, model_type='s_learner', 
-                     learner_type='classification', propensity_score=None, n_splits=5, random_state=42):
+                     learner_type='classification', propensity_score=None, n_splits=5, random_state=42,
+                     use_gpr=False, kernel_type='rbf'):
     """k-foldクロスバリデーションを使ってモデルを評価する
     
     Args:
@@ -179,6 +411,8 @@ def evaluate_model_cv(X, treatment, outcome, true_ite=None, model_type='s_learne
         propensity_score: 傾向スコア（オプション）
         n_splits: 交差検証の分割数
         random_state: 乱数シード
+        use_gpr: ガウス過程回帰を使用するかどうか
+        kernel_type: GPRを使用する場合のカーネルタイプ ('rbf', 'matern', 'combined')
         
     Returns:
         評価結果の辞書
@@ -252,9 +486,15 @@ def evaluate_model_cv(X, treatment, outcome, true_ite=None, model_type='s_learne
         try:
             # モデルの学習と処置効果の予測
             if model_type == 's_learner':
-                model, train_pred = train_s_learner(X_train, treatment_train, outcome_train, 
+                if use_gpr:
+                    model, train_pred = train_s_learner_gpr(X_train, treatment_train, outcome_train, 
+                                               kernel_type, ps_train, verbose=False)
+                    _, test_pred = train_s_learner_gpr(X_train, treatment_train, outcome_train, 
+                                             kernel_type, ps_train, test_data=X_test, verbose=False)
+                else:
+                    model, train_pred = train_s_learner(X_train, treatment_train, outcome_train, 
                                                learner_type, ps_train)
-                _, test_pred = train_s_learner(X_train, treatment_train, outcome_train, 
+                    _, test_pred = train_s_learner(X_train, treatment_train, outcome_train, 
                                              learner_type, ps_train, test_data=X_test)
                 
                 # 目的変数の予測 - 直接訓練されたモデルを使用
@@ -302,9 +542,15 @@ def evaluate_model_cv(X, treatment, outcome, true_ite=None, model_type='s_learne
                     outcome_prediction_success = False
             
             elif model_type == 't_learner':
-                model, train_pred = train_t_learner(X_train, treatment_train, outcome_train, 
+                if use_gpr:
+                    model, train_pred = train_t_learner_gpr(X_train, treatment_train, outcome_train, 
+                                               kernel_type, verbose=False)
+                    _, test_pred = train_t_learner_gpr(X_train, treatment_train, outcome_train, 
+                                             kernel_type, test_data=X_test, verbose=False)
+                else:
+                    model, train_pred = train_t_learner(X_train, treatment_train, outcome_train, 
                                                learner_type)
-                _, test_pred = train_t_learner(X_train, treatment_train, outcome_train, 
+                    _, test_pred = train_t_learner(X_train, treatment_train, outcome_train, 
                                              learner_type, test_data=X_test)
                 
                 # 目的変数の予測 - T-Learnerの場合、処置群と対照群の別々のモデルがある
@@ -330,27 +576,44 @@ def evaluate_model_cv(X, treatment, outcome, true_ite=None, model_type='s_learne
                     outcome_prediction_success = False
             
             elif model_type == 'x_learner':
-                model, train_pred = train_x_learner(X_train, treatment_train, outcome_train, ps_train)
-                _, test_pred = train_x_learner(X_train, treatment_train, outcome_train, 
-                                             ps_train, test_data=X_test)
+                if use_gpr:
+                    model, train_pred = train_x_learner_gpr(X_train, treatment_train, outcome_train, 
+                                               kernel_type, ps_train, verbose=False)
+                    _, test_pred = train_x_learner_gpr(X_train, treatment_train, outcome_train, 
+                                             kernel_type, ps_train, test_data=X_test, verbose=False)
+                else:
+                    model, train_pred = train_x_learner(X_train, treatment_train, outcome_train, 
+                                               learner_type, ps_train)
+                    _, test_pred = train_x_learner(X_train, treatment_train, outcome_train, 
+                                             learner_type, ps_train, test_data=X_test)
                 
                 # X-Learnerの目的変数予測は複雑なので、代替モデルを使用
                 outcome_prediction_success = False
             
             elif model_type == 'r_learner':
-                model, train_pred = train_r_learner(X_train, treatment_train, outcome_train)
-                _, test_pred = train_r_learner(X_train, treatment_train, outcome_train, 
-                                             test_data=X_test)
+                if use_gpr:
+                    model, train_pred = train_r_learner_gpr(X_train, treatment_train, outcome_train, 
+                                               kernel_type, verbose=False)
+                    _, test_pred = train_r_learner_gpr(X_train, treatment_train, outcome_train, 
+                                             kernel_type, test_data=X_test, verbose=False)
+                else:
+                    model, train_pred = train_r_learner(X_train, treatment_train, outcome_train, 
+                                               learner_type)
+                    _, test_pred = train_r_learner(X_train, treatment_train, outcome_train, 
+                                             learner_type, test_data=X_test)
                 
                 # R-Learnerの目的変数予測は複雑なので、代替モデルを使用
                 outcome_prediction_success = False
             
             elif model_type == 'dr_learner':
-                if ps_train is None:
-                    print("DR Learnerには傾向スコアが必要です")
-                    continue
-                model, train_pred = train_dr_learner(X_train, treatment_train, outcome_train, ps_train)
-                _, test_pred = train_dr_learner(X_train, treatment_train, outcome_train, 
+                if use_gpr:
+                    raise ValueError("DR-LearnerはGPRをサポートしていません")
+                else:
+                    if ps_train is None:
+                        print("DR Learnerには傾向スコアが必要です")
+                        continue
+                    model, train_pred = train_dr_learner(X_train, treatment_train, outcome_train, ps_train)
+                    _, test_pred = train_dr_learner(X_train, treatment_train, outcome_train, 
                                               ps_train, test_data=X_test)
                 
                 # DR-Learnerの目的変数予測は複雑なので、代替モデルを使用
@@ -564,31 +827,95 @@ def evaluate_model_cv(X, treatment, outcome, true_ite=None, model_type='s_learne
     return result
 
 def evaluate_all_models_cv(X, treatment, outcome, true_ite=None, propensity_score=None, 
-                         n_splits=5, random_state=42):
+                         n_splits=5, random_state=42, use_gpr=False, kernel_type='rbf'):
     """すべてのモデルをk-foldクロスバリデーションで評価し、結果を返す"""
-    X = ensure_dataframe(X)
     results = {}
     
-    # モデルタイプとそのパラメータのリスト
-    model_configs = [
-        {'name': 's_learner_cls', 'type': 's_learner', 'learner': 'classification'},
-        {'name': 't_learner_cls', 'type': 't_learner', 'learner': 'classification'},
-        {'name': 's_learner_reg', 'type': 's_learner', 'learner': 'regression'},
-        {'name': 't_learner_reg', 'type': 't_learner', 'learner': 'regression'},
-        {'name': 'x_learner', 'type': 'x_learner', 'learner': 'regression'},
-        {'name': 'r_learner', 'type': 'r_learner', 'learner': 'regression'},
-        {'name': 'dr_learner', 'type': 'dr_learner', 'learner': 'regression'}
-    ]
+    # S-Learner (分類)
+    if not use_gpr:
+        results['s_learner_cls'] = evaluate_model_cv(
+            X, treatment, outcome, true_ite, 's_learner', 'classification', 
+            propensity_score, n_splits, random_state
+        )
     
-    for config in model_configs:
-        print(f"\n評価モデル: {config['name']}")
-        results[config['name']] = evaluate_model_cv(
-            X, treatment, outcome, true_ite, 
-            model_type=config['type'], 
-            learner_type=config['learner'],
-            propensity_score=propensity_score,
-            n_splits=n_splits,
-            random_state=random_state
+    # S-Learner (回帰)
+    if not use_gpr:
+        results['s_learner_reg'] = evaluate_model_cv(
+            X, treatment, outcome, true_ite, 's_learner', 'regression', 
+            propensity_score, n_splits, random_state
+        )
+    
+    # T-Learner (分類)
+    if not use_gpr:
+        results['t_learner_cls'] = evaluate_model_cv(
+            X, treatment, outcome, true_ite, 't_learner', 'classification', 
+            propensity_score, n_splits, random_state
+        )
+    
+    # T-Learner (回帰)
+    if not use_gpr:
+        results['t_learner_reg'] = evaluate_model_cv(
+            X, treatment, outcome, true_ite, 't_learner', 'regression', 
+            propensity_score, n_splits, random_state
+        )
+    
+    # X-Learner
+    if not use_gpr:
+        results['x_learner'] = evaluate_model_cv(
+            X, treatment, outcome, true_ite, 'x_learner', 'regression', 
+            propensity_score, n_splits, random_state
+        )
+    
+    # R-Learner
+    if not use_gpr:
+        results['r_learner'] = evaluate_model_cv(
+            X, treatment, outcome, true_ite, 'r_learner', 'regression', 
+            propensity_score, n_splits, random_state
+        )
+    
+    # DR-Learner
+    if not use_gpr:
+        results['dr_learner'] = evaluate_model_cv(
+            X, treatment, outcome, true_ite, 'dr_learner', 'regression', 
+            propensity_score, n_splits, random_state
+        )
+    
+    # GPRモデルの評価（use_gprがTrueの場合）
+    if use_gpr:
+        # S-Learner (GPR - RBF)
+        results['s_learner_gpr_rbf'] = evaluate_model_cv(
+            X, treatment, outcome, true_ite, 's_learner', 'regression', 
+            propensity_score, n_splits, random_state, use_gpr=True, kernel_type='rbf'
+        )
+        
+        # T-Learner (GPR - RBF)
+        results['t_learner_gpr_rbf'] = evaluate_model_cv(
+            X, treatment, outcome, true_ite, 't_learner', 'regression', 
+            propensity_score, n_splits, random_state, use_gpr=True, kernel_type='rbf'
+        )
+        
+        # X-Learner (GPR - RBF)
+        results['x_learner_gpr_rbf'] = evaluate_model_cv(
+            X, treatment, outcome, true_ite, 'x_learner', 'regression', 
+            propensity_score, n_splits, random_state, use_gpr=True, kernel_type='rbf'
+        )
+        
+        # R-Learner (GPR - RBF)
+        results['r_learner_gpr_rbf'] = evaluate_model_cv(
+            X, treatment, outcome, true_ite, 'r_learner', 'regression', 
+            propensity_score, n_splits, random_state, use_gpr=True, kernel_type='rbf'
+        )
+        
+        # S-Learner (GPR - Matérn)
+        results['s_learner_gpr_matern'] = evaluate_model_cv(
+            X, treatment, outcome, true_ite, 's_learner', 'regression', 
+            propensity_score, n_splits, random_state, use_gpr=True, kernel_type='matern'
+        )
+        
+        # S-Learner (GPR - 複合カーネル)
+        results['s_learner_gpr_combined'] = evaluate_model_cv(
+            X, treatment, outcome, true_ite, 's_learner', 'regression', 
+            propensity_score, n_splits, random_state, use_gpr=True, kernel_type='combined'
         )
     
     return results

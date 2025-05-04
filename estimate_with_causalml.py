@@ -12,6 +12,8 @@ from scipy.stats import pearsonr
 from typing import Dict, Tuple, List, Optional, Union
 import argparse
 from tqdm import tqdm
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import RBF, ConstantKernel, Matern
 
 # 自作モジュールのインポート
 from data_preprocessing import prepare_data
@@ -121,7 +123,15 @@ def main():
     parser.add_argument('--uplift_method', type=str, default=None,
                       help='評価するモデルタイプ (s_learner, t_learner, x_learner, r_learner, dr_learner)')
     parser.add_argument('--prediction_method', type=str, default=None,
-                      help='評価する学習器タイプ (classification, regression)')
+                      help='評価するモデルタイプ (classification, regression)')
+    parser.add_argument('--model_type', type=str, default='lgbm', choices=['lgbm', 'gpr'],
+                      help='使用するモデルタイプ (lgbm: LightGBM, gpr: ガウス過程回帰)')
+    parser.add_argument('--kernel_type', type=str, default='rbf', choices=['rbf', 'matern', 'combined'],
+                      help='GPRを使用する場合のカーネルタイプ (rbf, matern, combined)')
+    parser.add_argument('--subsample', type=float, default=1.0,
+                      help='データのサブサンプリング率（0.0-1.0）。GPRモデルの高速化に有効。')
+    parser.add_argument('--verbose', action='store_true',
+                      help='詳細な進捗表示を行うかどうか')
     parser.add_argument('--cv', action='store_true',
                       help='クロスバリデーションを実行するかどうか')
     parser.add_argument('--threshold', type=float, default=0.5,
@@ -178,6 +188,26 @@ def main():
     feature_level = 'original'
     df, X, treatment, outcome, oracle_info, feature_cols = prepare_data(df, feature_level)
 
+    # サブサンプリング（GPRモデルの高速化のため）
+    if args.subsample < 1.0 and args.subsample > 0.0:
+        from sklearn.model_selection import train_test_split
+        sample_size = int(len(df) * args.subsample)
+        print(f"\n===== データをサブサンプリング（{args.subsample * 100:.1f}%、{sample_size}件）=====")
+        # 層化サンプリング（処置群と対照群の比率を保持）
+        indices, _ = train_test_split(
+            np.arange(len(df)), 
+            test_size=1.0-args.subsample, 
+            stratify=treatment,
+            random_state=42
+        )
+        df = df.iloc[indices].reset_index(drop=True)
+        X = X.iloc[indices].reset_index(drop=True)
+        treatment = treatment.iloc[indices].reset_index(drop=True)
+        outcome = outcome.iloc[indices].reset_index(drop=True)
+        print(f"サブサンプリング後のデータサイズ: {len(df)}件")
+        print(f"処置群: {sum(treatment)}件 ({sum(treatment)/len(treatment)*100:.1f}%)")
+        print(f"対照群: {len(treatment)-sum(treatment)}件 ({(1-sum(treatment)/len(treatment))*100:.1f}%)")
+
     print("X:\n", X)
     print("treatment:\n", treatment)
     print("outcome:\n", outcome)
@@ -214,18 +244,43 @@ def main():
     # 分類器と回帰器のモデル比較部分は、指定したモデルのみ実行
     #if args.causal_model_name:
         # モデルトレーナーの取得
-    model_trainer = get_model_trainer(uplift_method, prediction_method)
+    model_trainer = get_model_trainer(
+        uplift_method, 
+        prediction_method, 
+        model_type=args.model_type, 
+        kernel_type=args.kernel_type,
+        verbose=args.verbose
+    )
 
     if model_trainer:
         # モデルタイプの判別
+        model_type_str = f"{args.model_type}"
+        if args.model_type == 'gpr':
+            model_type_str += f"_{args.kernel_type}"
+        
+        print(f"\n===== {causal_model_name} ({model_type_str})の評価 =====")
 
         if args.cv:
-            print(f"\n===== {causal_model_name}のクロスバリデーション評価 =====")
-            cv_top_n_results = evaluate_cv_with_top_n(model_trainer, X, outcome, treatment, fold_count=5)
-            #print(cv_top_n_results)
+            print(f"\n===== {causal_model_name} ({model_type_str})のクロスバリデーション評価 =====")
+            # GPRモデルを使用する場合は、use_gpr=Trueを渡す
+            if args.model_type == 'gpr':
+                from causal_models import evaluate_all_models_cv
+                cv_results = evaluate_all_models_cv(
+                    X, treatment, outcome, 
+                    true_ite=df['true_ite'].values if 'true_ite' in df.columns else None,
+                    propensity_score=p_score, 
+                    n_splits=args.folds, 
+                    random_state=42,
+                    use_gpr=True,
+                    kernel_type=args.kernel_type
+                )
+                print_cv_results(cv_results)
+            else:
+                cv_top_n_results = evaluate_cv_with_top_n(model_trainer, X, outcome, treatment, fold_count=args.folds)
+                #print(cv_top_n_results)
         
         # モデルを学習し、ITE予測
-        print(f"\n===== {causal_model_name}のITE予測 =====")
+        print(f"\n===== {causal_model_name} ({model_type_str})のITE予測 =====")
 
         # モデルのトレーニング
         print(f"モデル学習開始: {causal_model_name}")
@@ -247,7 +302,10 @@ def main():
         print(result_df)
         
         # CSV出力
-        result_file = f'{causal_model_name}_uplift_predictions.csv'
+        result_file = f'{causal_model_name}_{args.model_type}'
+        if args.model_type == 'gpr':
+            result_file += f'_{args.kernel_type}'
+        result_file += '_uplift_predictions.csv'
         result_df.to_csv(result_file, index=False)
         print(f"予測結果を保存しました: {result_file}")
 
