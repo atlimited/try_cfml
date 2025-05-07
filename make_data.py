@@ -177,6 +177,12 @@ def generate_simulation(N=1000, n_treated=None, seed=0, group_ratios=None):
 
 # Example usage
 # デフォルトでは特徴量に基づいてグループ分けを行う
-df = generate_simulation(N=10000, n_treated=2000, seed=0)
+#df = generate_simulation(N=10000, n_treated=2000, seed=0)
+#df = generate_simulation(N=10000, n_treated=2000, seed=0, group_ratios=[1, 0, 0, 0])
+df = generate_simulation(N=10000, n_treated=2000, seed=0, group_ratios=[0.25, 0.25, 0.25, 0.25])
 print(df.head())
-df.to_csv("df.csv", index=False)
+#df.to_csv("df.csv", index=False)
+#file_name = "df_only_1group.csv"
+file_name = "df_balanced_group.csv"
+df.to_csv(file_name, index=False)
+print(f"{file_name} saved")

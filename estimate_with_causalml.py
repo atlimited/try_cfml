@@ -128,8 +128,9 @@ def main():
                       help='使用するモデルタイプ (lgbm: LightGBM, gpr: ガウス過程回帰)')
     parser.add_argument('--kernel_type', type=str, default='rbf', choices=['rbf', 'matern', 'combined'],
                       help='GPRを使用する場合のカーネルタイプ (rbf, matern, combined)')
-    parser.add_argument('--subsample', type=float, default=1.0,
+    parser.add_argument('--subsample', type=float, default=0.2, 
                       help='データのサブサンプリング率（0.0-1.0）。GPRモデルの高速化に有効。')
+
     parser.add_argument('--verbose', action='store_true',
                       help='詳細な進捗表示を行うかどうか')
     parser.add_argument('--cv', action='store_true',
@@ -174,7 +175,13 @@ def main():
     print(f"\n===== {causal_model_name}モデルの評価を開始 =====")
     
     # データ読み込み
-    df = pd.read_csv("df.csv")
+    #df = pd.read_csv("df.csv")
+    #df = pd.read_csv("matched_df.csv")
+    #df = pd.read_csv("df_only_1group.csv")
+    df = pd.read_csv("df_balanced_group.csv")
+    
+    # 元のデータを保存（後で予測に使用）
+    df_orig = df.copy()
 
     # データフレームの構造確認
     print("\n===== データフレームの構造 =====")
@@ -289,17 +296,26 @@ def main():
         model = model_trainer(X, treatment, outcome, propensity_score=p_score)
         print(f"モデル学習完了: {model}, モデルタイプ: {type(model)}")
 
+        # 元の全データを読み込み（予測用）
+        print("元の全データを読み込み中（予測用）...")
+        full_df = df_orig.copy()
+        
+        # 予測用の特徴量を準備
+        # 元の特徴量リストを使用
+        X_full = full_df[['age', 'homeownership']].copy()
+        print(f"予測用全データの形状: {X_full.shape}")
+        
         # ITE予測
         print(f"ITE予測開始: {causal_model_name}")
-        ite_pred = model.predict(X)
+        ite_pred = model.predict(X_full)
         print(f"ITE予測値の形状: {ite_pred.shape}")
-        print(ite_pred)
+        print(ite_pred[:10])  # 最初の10件だけ表示
         print(f"ITE予測完了: {causal_model_name}, 予測形状: {ite_pred.shape}")
 
         # データフレームに結果を保存
-        result_df = df.copy()
+        result_df = full_df.copy()
         result_df['ite_pred'] = ite_pred
-        print(result_df)
+        print(result_df.head())
         
         # CSV出力
         result_file = f'{causal_model_name}_{args.model_type}'
@@ -308,15 +324,20 @@ def main():
         result_file += '_uplift_predictions.csv'
         result_df.to_csv(result_file, index=False)
         print(f"予測結果を保存しました: {result_file}")
+        print(result_df.shape)
 
         # 予測上位N人のATE計算
         print("\n===== 予測上位N人のATE =====")
         from model_evaluation import calculate_top_n_ate
         
+        # 全データのtreatmentとoutcomeを取得
+        full_treatment = full_df['treatment'].values
+        full_outcome = full_df['outcome'].values
+        
         # 計算するN値のリスト
         ns = [500, 1000, 2000]
         
-        top_n_results = calculate_top_n_ate(ite_pred, treatment, outcome, ns=ns)
+        top_n_results = calculate_top_n_ate(ite_pred, full_treatment, full_outcome, ns=ns)
 
         # 結果の表示
         for n, result in top_n_results.items():
@@ -350,64 +371,50 @@ def main():
             #    
             #    # 真の改善率
             #    print(f"\n  真の効果での比較:")
-            #    print(f"    上位{n}人処置の真の効果: {result['true_n_effect']:.4f}")
-            #    print(f"    元の処置戦略の真の効果: {result['original_true_effect']:.4f}")
-            #    print(f"    真の改善率: {result['true_improvement_ratio']:.2f}倍")
-            
-            
         # 真のITEがある場合
-        if 'true_ite' in df.columns:
-            true_ite = df['true_ite'].values
-            print("\nオラクルを使った評価")
-            
-            # 上位N人による評価
+        if 'true_ite' in full_df.columns:
+            true_ite = full_df['true_ite'].values
+            print(f"\nオラクルを使った評価")
             print("\n上位N人に処置した場合の効果:")
-            print("  N\t効果総和\t効率\t改善率\t備考")
+            print("  N     効果総和    効率      改善率     備考")
             
             # 元の処置戦略の効果
-            original_treated_indices = np.where(treatment == 1)[0]
+            original_treated_indices = np.where(full_treatment == 1)[0]
             original_effect_sum = np.sum(true_ite[original_treated_indices])
             
-            for n in sorted(list(top_n_results.keys()) + [len(original_treated_indices)]):
-                # 上位n人のインデックス
-                top_n_indices = np.argsort(-ite_pred.flatten())[:n]
-                
-                # 上位n人の効果
-                top_n_effect_sum = np.sum(true_ite[top_n_indices])
-                
-                # 効率（全体の効果に対する割合）
-                total_effect = np.sum(true_ite)
-                top_n_efficiency = top_n_effect_sum / total_effect if total_effect > 0 else 0
-                
-                # 改善率（元の処置戦略に対する改善度）
-                top_n_improvement = top_n_effect_sum / original_effect_sum if original_effect_sum > 0 else 0
-                
-                # 備考
-                note = ""
-                if n == len(original_treated_indices):
-                    note = "元の処置人数"
-                elif n in top_n_results:
-                    note = ""
-                
-                print(f"  {n}\t{top_n_effect_sum:.2f}\t{top_n_efficiency:.2f} ({top_n_efficiency*100:.1f}%)\t{top_n_improvement:.2f}倍\t{note}")
-        
-            # 上位N人による評価（実際の処置数を含む）
-            print("\n上位N人に処置した場合の効果:")
-            print("  N\t効果総和\t効率\t改善率\t備考")
-            # その他の1000刻みの評価も表示
-            for n in range(1000, 10001, 1000):
-                # 上位n人を処置対象として選択
+            # 計算するN値のリストを拡張
+            all_ns = sorted(list(top_n_results.keys()) + [len(original_treated_indices)])
+            
+            for n in all_ns:
+                # 上位N人のインデックスを取得
                 top_n_indices = np.argsort(-ite_pred.flatten())[:n]
                 top_n_effect_sum = np.sum(true_ite[top_n_indices])
                 
-                # 効率とROI計算
-                top_n_efficiency = top_n_effect_sum / total_effect if total_effect > 0 else 0
-                top_n_improvement = top_n_effect_sum / original_effect_sum if original_effect_sum > 0 else 0
+                # 元の処置数との比較
+                original_n = len(original_treated_indices)
+                efficiency = top_n_effect_sum / n * 100 if n > 0 else 0
+                improvement = top_n_effect_sum / original_effect_sum if original_effect_sum > 0 else 0
                 
-                # 実際の処置人数と同じ場合は注釈を追加
-                note = "実際の処置人数" if n == len(original_treated_indices) else ""
+                note = "元の処置人数" if n == original_n else ""
                 
-                print(f"  {n}\t{top_n_effect_sum:.2f}\t{top_n_efficiency:.2f} ({top_n_efficiency*100:.1f}%)\t{top_n_improvement:.2f}倍\t{note}")
+                print(f"  {n:<5} {top_n_effect_sum:<8.2f}   {efficiency/100:<4.2f} ({efficiency:.1f}%)   {improvement:<5.2f}倍   {note}")
+            
+            # さらに大きなN値で評価
+            larger_ns = [1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000]
+            larger_ns = [n for n in larger_ns if n > max(all_ns) and n <= len(ite_pred)]
+            
+            if larger_ns:
+                print("\n上位N人に処置した場合の効果:")
+                print("  N     効果総和    効率      改善率     備考")
+                
+                for n in larger_ns:
+                    top_n_indices = np.argsort(-ite_pred.flatten())[:n]
+                    top_n_effect_sum = np.sum(true_ite[top_n_indices])
+                    
+                    efficiency = top_n_effect_sum / n * 100 if n > 0 else 0
+                    improvement = top_n_effect_sum / original_effect_sum if original_effect_sum > 0 else 0
+                    
+                    print(f"  {n:<5} {top_n_effect_sum:<8.2f}   {efficiency/100:<4.2f} ({efficiency:.1f}%)   {improvement:<5.2f}倍   ")
 
     else:
         print(f"エラー: モデル{causal_model_name}の学習関数がありません")

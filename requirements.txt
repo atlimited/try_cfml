@@ -27,3 +27,5 @@ causalml==0.15.3
 
 # Open Bandit Platform
 obp==0.4.1
+
+psmpy==0.3.13
